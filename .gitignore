@@ -1,6 +1,7 @@
 __pycache__
 .vscode
 .git
+.github
 data
 checkpoints
 exp
@@ -10,9 +11,11 @@ logs
 runs
 containers
 _old
+tmp*
 
 *.log
 *.def
 *.sif
 *.txt
 !requirements.txt
+test.*

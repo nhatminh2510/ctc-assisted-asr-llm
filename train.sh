@@ -18,13 +18,14 @@ fi
 
 # Check if config exists
 conf="/home/25/minh/CTC-assisted-ASR-LLM/configs/train_wavlm-ft-ctc_llm.yaml"
+# conf="/home/25/minh/CTC-assisted-ASR-LLM/configs/train_wavlm-ft-ctc_llm_GB10.yaml"
 if [ ! -f "$conf" ]; then
     echo "ERROR: Config file not found at $conf"
     exit 1
 fi
 
 # Create output directory if not exists
-output_dir="exp/wavlm-ft-ctc_llm_libri_eval_bs16"
+output_dir="exp/wavlm-ft-ctc_llm_libri_eval_bs4_no-cut-prompt"
 log_dir="$output_dir/logs"
 mkdir -p $output_dir/checkpoints
 mkdir -p "$log_dir"
@@ -47,6 +48,7 @@ rotate_file() {
 }
 
 rotate_file "$log_dir/training.log"
+rotate_file "$log_dir/eval.log"
 # Load checkpoint
 checkpoint=""
 if [ -n "$checkpoint" ]; then

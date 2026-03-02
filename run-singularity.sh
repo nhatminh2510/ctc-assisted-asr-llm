@@ -21,5 +21,6 @@ set image = $1
 # 	exit 1
 # endifs
 
-singularity run --nv --bind /home,/home-local,/CDshare,/kailab,/App,/LabWork,/UserTmp,/local,/Mirror --no-home $image
+# singularity run --nv --bind /home,/home-local,/CDshare,/kailab,/App,/LabWork,/UserTmp,/local,/Mirror --no-home $image
+singularity run --writable-tmpfs --nv --bind /home,/home-local,/CDshare,/kailab,/App,/LabWork,/UserTmp,/local,/Mirror --no-home $image
 # ,/localStore

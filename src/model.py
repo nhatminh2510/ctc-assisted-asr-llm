@@ -7,6 +7,8 @@ from transformers import (
     AutoProcessor,
     AutoModelForCausalLM,
 )
+
+# from peft import LoraConfig, get_peft_model, TaskType
 from src.hotword_filter import create_prompt_with_hotwords
 from typing import Optional, Dict, Any, Tuple, List
 import logging
@@ -83,6 +85,7 @@ class CTCAssistedLLMASR(nn.Module):
         decoder_id: str = "lmsys/vicuna-7b-v1.5",
         freeze_encoder: bool = True,
         freeze_llm: bool = True,
+        use_lora: bool = False,  # Added LoRA flag
         use_gradient_checkpointing: bool = False,
         dropout: float = 0.1,
     ):
@@ -107,21 +110,43 @@ class CTCAssistedLLMASR(nn.Module):
 
         # 3. Load LLM
         logger.info(f"Loading LLM: {decoder_id}")
-        self.tokenizer = AutoTokenizer.from_pretrained(decoder_id, use_fast=True)
+        self.decoder_processor = AutoTokenizer.from_pretrained(
+            decoder_id, use_fast=True
+        )
 
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        if self.decoder_processor.pad_token is None:
+            self.decoder_processor.pad_token = self.decoder_processor.eos_token
+        logger.info(
+            f"Tokenizer loaded. Pad token: {self.decoder_processor.pad_token}, "
+            f"EOS token: {self.decoder_processor.eos_token}"
+        )
 
         self.llm = AutoModelForCausalLM.from_pretrained(
             decoder_id, torch_dtype=torch.bfloat16
         )
-        self.decoder_processor = AutoProcessor.from_pretrained(decoder_id)
 
         self.llm_hidden_size = self.llm.config.hidden_size
 
         if freeze_llm:
             self.llm.requires_grad_(False)
             logger.info("LLM frozen")
+
+            if use_lora:
+                # logger.info("Applying LoRA to the frozen LLM...")
+                # lora_config = LoraConfig(
+                #     task_type=TaskType.CAUSAL_LM,
+                #     inference_mode=False,
+                #     r=8,
+                #     lora_alpha=32,
+                #     lora_dropout=0.1,
+                #     target_modules=[
+                #         "q_proj",
+                #         "v_proj",
+                #     ],  # Standard for LLaMA/Vicuna architectures
+                # )
+                # self.llm = get_peft_model(self.llm, lora_config)
+                # self.llm.print_trainable_parameters()
+                pass
 
         # 4. Audio Projector
         self.projector = AudioProjector(
@@ -131,9 +156,6 @@ class CTCAssistedLLMASR(nn.Module):
             conv_kernel_size=self.conv_stride,
             dropout=dropout,
         )
-
-        # Ensure dtype consistency
-        self.projector = self.projector.to(self.llm.dtype)
 
         # 5. Gradient checkpointing
         if use_gradient_checkpointing:
@@ -226,6 +248,7 @@ class CTCAssistedLLMASR(nn.Module):
         input_ids: torch.LongTensor,
         encoder_attention_mask: torch.LongTensor,
         decoder_attention_mask: torch.LongTensor,
+        prompt_lengths: Optional[List[int]] = None,  # Added prompt_lengths
         **kwargs,
     ):
         """
@@ -249,9 +272,14 @@ class CTCAssistedLLMASR(nn.Module):
             decoder_attention_mask,
         )
 
-        # 2. Mask padding
+        # 2. Mask padding and prompts
         labels = input_ids.clone()
         labels[decoder_attention_mask == 0] = -100
+
+        # Mask out the prompt tokens so loss is only calculated on the transcription
+        if prompt_lengths is not None:
+            for i, length in enumerate(prompt_lengths):
+                labels[i, :length] = -100
 
         # 3. Pad labels with audio part
         labels = F.pad(
@@ -278,7 +306,6 @@ class CTCAssistedLLMASR(nn.Module):
         decoder_attention_mask: torch.LongTensor,
         max_new_tokens: int = 1024,
         num_beams: int = 4,
-        temperature: float = 1.0,
         **kwargs,
     ):
         # 1. Embed audio and prompt
@@ -292,9 +319,8 @@ class CTCAssistedLLMASR(nn.Module):
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
-            temperature=temperature,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.decoder_processor.eos_token_id,
+            pad_token_id=self.decoder_processor.pad_token_id,
             **kwargs,
         )
         return generated_ids

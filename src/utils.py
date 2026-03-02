@@ -183,6 +183,9 @@ def compute_wer(predictions: List[str], references: List[str]) -> float:
         )
 
 
+LOG_FORMAT = "%(asctime)s - [%(filename)s:%(lineno)d] - %(levelname)s - %(message)s"
+
+
 def setup_logging(log_file: Optional[str] = None, level: int = logging.INFO) -> None:
     """
     Thiết lập logging.
@@ -198,9 +201,37 @@ def setup_logging(log_file: Optional[str] = None, level: int = logging.INFO) -> 
 
     logging.basicConfig(
         level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format=LOG_FORMAT,
         handlers=handlers,
     )
+
+
+def switch_log_file(new_log_file: str) -> Optional[str]:
+    """
+    Thay đổi file handler của root logger sang file mới.
+
+    Args:
+        new_log_file: Đường dẫn đến file log mới
+
+    Returns:
+        old_log_file: Đường dẫn file log cũ (hoặc None nếu không có)
+    """
+    root_logger = logging.getLogger()
+    old_log_file = None
+
+    # Tìm và xóa FileHandler cũ
+    for handler in root_logger.handlers[:]:
+        if isinstance(handler, logging.FileHandler):
+            old_log_file = handler.baseFilename
+            handler.close()
+            root_logger.removeHandler(handler)
+
+    # Thêm FileHandler mới
+    new_handler = logging.FileHandler(new_log_file)
+    new_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    root_logger.addHandler(new_handler)
+
+    return old_log_file
 
 
 def load_config(config_path: str) -> Dict[str, Any]:

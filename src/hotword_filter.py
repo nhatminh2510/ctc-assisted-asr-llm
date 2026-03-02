@@ -473,6 +473,7 @@ def create_prompt_with_hotwords(
 
     Args:
         filtered_hotwords: Danh sách hotwords đã được lọc
+        transcription: Transcription text (nếu có, thêm EOS token '</s>' ở cuối)
 
     Returns:
         prompt: Prompt text theo định dạng
@@ -482,6 +483,10 @@ def create_prompt_with_hotwords(
         -> "USER: Transcribe speech to text. Some hotwords might help.
             The hotwords are bertie, alice. ASSISTANT:"
     """
+    # Thêm EOS token vào cuối transcription để model học khi nào dừng
+    if transcription:
+        transcription = f"{transcription}</s>"
+
     if not filtered_hotwords:
         prompt = f"USER: Transcribe speech to text. ASSISTANT: {transcription}"
     else:

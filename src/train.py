@@ -24,6 +24,7 @@ from src.utils import (
     load_checkpoint,
     compute_wer,
     setup_logging,
+    switch_log_file,
     set_seed,
 )
 from src.hotword_filter import create_prompt_with_hotwords
@@ -41,50 +42,53 @@ def get_collate_fn(
     def collate_fn_cpu(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Collate: pad audio + tạo attention mask + tokenize transcriptions"""
         encoder_inputs = encoder_processor(
-            # [sample["audio"].squeeze(0).numpy() for sample in batch],
             [sample["audio"] for sample in batch],
             sampling_rate=16000,
             return_tensors="pt",
             return_attention_mask=True,
             padding=True,
         )
-        logger.debug(
-            f"encoder_inputs.input_values dtype: {encoder_inputs.input_values.dtype}, shape: {encoder_inputs.input_values.shape}"
+        # Calculate prompt lengths for masking
+        prompts_only = [
+            create_prompt_with_hotwords(sample["hotwords"]) for sample in batch
+        ]
+        prompt_only_inputs = decoder_processor(
+            prompts_only,
+            return_tensors="pt",
+            padding=True,
         )
-        logger.debug(f"encoder_inputs keys: {list(encoder_inputs.keys())}")
-        logger.debug(
-            f"encoder_inputs shapes: {[(k, v.shape) for k, v in encoder_inputs.items()]}"
+        prompt_lengths = (prompt_only_inputs.attention_mask == 1).sum(dim=1).tolist()
+
+        # Full prompt + transcription (for train loss / eval loss)
+        full_prompts = [
+            create_prompt_with_hotwords(sample["hotwords"], sample["transcription"])
+            for sample in batch
+        ]
+        full_decoder_inputs = decoder_processor(
+            full_prompts,
+            return_tensors="pt",
+            padding=True,
         )
+
         if mode == "train":
-            prompts = [
-                create_prompt_with_hotwords(sample["hotwords"], sample["transcription"])
-                for sample in batch
-            ]
-            decoder_inputs = decoder_processor(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-            )
             return {
                 "input_values": encoder_inputs.input_values,
-                "input_ids": decoder_inputs.input_ids,
+                "input_ids": full_decoder_inputs.input_ids,
                 "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": decoder_inputs.attention_mask,
+                "decoder_attention_mask": full_decoder_inputs.attention_mask,
+                "prompt_lengths": prompt_lengths,
             }
         elif mode == "eval":
-            prompts = [
-                create_prompt_with_hotwords(sample["hotwords"]) for sample in batch
-            ]
-            decoder_inputs = decoder_processor(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-            )
             return {
                 "input_values": encoder_inputs.input_values,
-                "input_ids": decoder_inputs.input_ids,
+                # Full prompt+transcription for loss computation
+                "input_ids": full_decoder_inputs.input_ids,
                 "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": decoder_inputs.attention_mask,
+                "decoder_attention_mask": full_decoder_inputs.attention_mask,
+                # Prompt-only for generation
+                "generate_input_ids": prompt_only_inputs.input_ids,
+                "generate_attention_mask": prompt_only_inputs.attention_mask,
+                "prompt_lengths": prompt_lengths,
                 "transcription": [sample["transcription"] for sample in batch],
             }
         else:
@@ -101,36 +105,46 @@ def get_collate_fn(
             padding=True,
         ).to("cuda")
 
+        prompts_only = [
+            create_prompt_with_hotwords(sample["hotwords"]) for sample in batch
+        ]
+        prompt_only_inputs = decoder_processor(
+            prompts_only,
+            return_tensors="pt",
+            padding=True,
+        ).to("cuda")
+        prompt_lengths = (prompt_only_inputs.attention_mask == 1).sum(dim=1).tolist()
+
+        # Full prompt + transcription (for train loss / eval loss)
+        full_prompts = [
+            create_prompt_with_hotwords(sample["hotwords"], sample["transcription"])
+            for sample in batch
+        ]
+        full_decoder_inputs = decoder_processor(
+            full_prompts,
+            return_tensors="pt",
+            padding=True,
+        ).to("cuda")
+
         if mode == "train":
-            prompts = [
-                create_prompt_with_hotwords(sample["hotwords"], sample["transcription"])
-                for sample in batch
-            ]
-            decoder_inputs = decoder_processor(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-            ).to("cuda")
             return {
                 "input_values": encoder_inputs.input_values,
-                "input_ids": decoder_inputs.input_ids,
+                "input_ids": full_decoder_inputs.input_ids,
                 "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": decoder_inputs.attention_mask,
+                "decoder_attention_mask": full_decoder_inputs.attention_mask,
+                "prompt_lengths": prompt_lengths,
             }
         elif mode == "eval":
-            prompts = [
-                create_prompt_with_hotwords(sample["hotwords"]) for sample in batch
-            ]
-            decoder_inputs = decoder_processor(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-            ).to("cuda")
             return {
                 "input_values": encoder_inputs.input_values,
-                "input_ids": decoder_inputs.input_ids,
+                # Full prompt+transcription for loss computation
+                "input_ids": full_decoder_inputs.input_ids,
                 "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": decoder_inputs.attention_mask,
+                "decoder_attention_mask": full_decoder_inputs.attention_mask,
+                # Prompt-only for generation
+                "generate_input_ids": prompt_only_inputs.input_ids,
+                "generate_attention_mask": prompt_only_inputs.attention_mask,
+                "prompt_lengths": prompt_lengths,
                 "transcription": [sample["transcription"] for sample in batch],
             }
         else:
@@ -196,8 +210,11 @@ class Trainer:
 
         # DataLoaders
         self.num_workers = config.get("num_workers", 0)
-        self.data_loading_device = self.device if self.num_workers == 0 else "cpu"
-        self.pin_memory = self.data_loading_device == "cpu"
+        self.data_loading_device = "cuda" if self.num_workers == 0 else "cpu"
+        if config.get("pin_memory", None) is not None:
+            self.pin_memory = config["pin_memory"]
+        else:
+            self.pin_memory = self.data_loading_device == "cpu"
         logger.warning(
             f"Data loading device: {self.data_loading_device}"
             f"(num_workers={self.num_workers}-pin_memory={self.pin_memory})"
@@ -214,6 +231,7 @@ class Trainer:
             ),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            prefetch_factor=2,
         )
         if val_dataset:
             self.val_loader = DataLoader(
@@ -228,12 +246,14 @@ class Trainer:
                 ),
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,
+                prefetch_factor=2,
             )
             self.normalizer = BasicTextNormalizer()
 
-        # Optimizer – chỉ train projector
+        # Optimizer – chỉ train projector AND LoRA weights
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = AdamW(
-            self.model.projector.parameters(),
+            trainable_params,
             lr=float(config["learning_rate"]),
             betas=(config["beta1"], config["beta2"]),
             weight_decay=config["weight_decay"],
@@ -249,6 +269,7 @@ class Trainer:
         self.grad_accumulation = config.get("grad_accumulation", 1)
         # Note: GradScaler not needed with bfloat16 native amp
         self.clip_grad_norm = config.get("clip_grad_norm", 1.0)
+        self.save_total_limit = config.get("save_total_limit", None)
 
         # TensorBoard Writer with timestamped run directory
         if output_dir:
@@ -269,9 +290,22 @@ class Trainer:
             self.checkpoint_dir = Path(config["checkpoint_dir"])
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        # Log files
+        self.output_dir = output_dir
+        self.train_log_file = (
+            str(Path(output_dir) / "logs" / "training.log") if output_dir else None
+        )
+        self.eval_log_file = (
+            str(Path(output_dir) / "logs" / "eval.log") if output_dir else None
+        )
+
         logger.info(f"Trainer initialized")
         logger.info(f"Max optimizer steps: {self.max_steps}")
         logger.info(f"Trainable parameters: {model.count_trainable_parameters():,}")
+
+        # Calculate steps per epoch for epoch tracking
+        self.steps_per_epoch = len(self.train_loader) // self.grad_accumulation
+        logger.info(f"Steps per epoch: {self.steps_per_epoch}")
 
     def _load_checkpoint(self, checkpoint_path: str) -> None:
         if not os.path.exists(checkpoint_path):
@@ -293,6 +327,33 @@ class Trainer:
             logger.error(f"Error loading checkpoint: {e}")
             raise
 
+    def _cleanup_checkpoints(self) -> None:
+        """Remove old checkpoints to keep only save_total_limit most recent ones.
+
+        Keeps best_model.pt and the N most recent step checkpoints,
+        where N = self.save_total_limit.
+        """
+        if self.save_total_limit is None or self.checkpoint_dir is None:
+            return
+
+        import re
+
+        # Collect step-based checkpoints (exclude best_model.pt)
+        step_checkpoints = []
+        for ckpt_file in self.checkpoint_dir.glob("checkpoint_step_*.pt"):
+            match = re.search(r"checkpoint_step_(\d+)\.pt$", ckpt_file.name)
+            if match:
+                step_checkpoints.append((int(match.group(1)), ckpt_file))
+
+        # Sort by step number (ascending)
+        step_checkpoints.sort(key=lambda x: x[0])
+
+        # Remove oldest checkpoints beyond the limit
+        while len(step_checkpoints) > self.save_total_limit:
+            _, oldest_ckpt = step_checkpoints.pop(0)
+            logger.info(f"Removing old checkpoint: {oldest_ckpt}")
+            oldest_ckpt.unlink()
+
     def to_cuda(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Đẩy tất cả Tensor trong batch lên device, giữ nguyên các kiểu dữ liệu khác."""
         return {
@@ -303,10 +364,14 @@ class Trainer:
     @torch.no_grad()
     def evaluate(
         self,
-        max_new_tokens: int = 256,
-        num_beams: int = 1,
+        max_new_tokens: int = 200,
+        num_beams: int = 4,
         do_sample: bool = False,
     ) -> tuple:
+        # Switch to eval log file
+        if self.eval_log_file:
+            switch_log_file(self.eval_log_file)
+
         self.model.eval()
         total_loss = 0
         num_batches = 0
@@ -324,17 +389,18 @@ class Trainer:
 
             generated_ids = self.model.generate(
                 input_values=batch["input_values"],
-                input_ids=batch["input_ids"],
+                input_ids=batch["generate_input_ids"],
                 encoder_attention_mask=batch["encoder_attention_mask"],
-                decoder_attention_mask=batch["decoder_attention_mask"],
+                decoder_attention_mask=batch["generate_attention_mask"],
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
                 do_sample=do_sample,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3,
             )
-            input_len = batch["input_ids"].shape[1]
-            actual_generated_ids = generated_ids[:, input_len:]
+
             predicted_texts = self.model.decoder_processor.batch_decode(
-                actual_generated_ids, skip_special_tokens=True
+                generated_ids, skip_special_tokens=True
             )
 
             hyps.extend(predicted_texts)
@@ -357,10 +423,18 @@ class Trainer:
 
         avg_loss = total_loss / max(num_batches, 1)
         wer = compute_wer(hyps, refs) if hyps and refs else 0.0
+        logger.info(
+            f"Step {self.global_step} | Eval Loss: {avg_loss:.4f} | WER: {wer:.4f}"
+        )
 
         if self.writer:
             self.writer.add_scalar("eval/loss", avg_loss, self.global_step)
             self.writer.add_scalar("eval/wer", wer, self.global_step)
+
+        # Switch back to training log file
+        if self.train_log_file:
+            switch_log_file(self.train_log_file)
+
         self.model.train()
         return avg_loss, wer
 
@@ -391,7 +465,7 @@ class Trainer:
 
                     if (batch_idx + 1) % self.grad_accumulation == 0:
                         grad_norm = torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), self.clip_grad_norm
+                            self.model.projector.parameters(), self.clip_grad_norm
                         )
                         self.optimizer.step()
                         self.optimizer.zero_grad()
@@ -418,6 +492,11 @@ class Trainer:
                                 grad_norm.item(),
                                 self.global_step,
                             )
+                            self.writer.add_scalar(
+                                "train/epoch",
+                                self.global_step / self.steps_per_epoch,
+                                self.global_step,
+                            )
 
                         progress_bar.update(1)
 
@@ -436,6 +515,7 @@ class Trainer:
                                 str(ckpt_path),
                             )
                             logger.info(f"Saved checkpoint at step {self.global_step}")
+                            self._cleanup_checkpoints()
 
                         # Evaluate
                         if (
@@ -585,6 +665,7 @@ def main():
         decoder_id=model_config["llm_model_path"],
         freeze_encoder=model_config["freeze_encoder"],
         freeze_llm=model_config["freeze_llm"],
+        use_lora=model_config.get("use_lora", False),
     )
 
     train_config = full_config["training"]

@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 class AudioProjector(nn.Module):
     """
-    version với proper initialization và dropout.
+    Linear projector matching reference EncoderProjectorCov1d:
+    Conv1D downsampling -> ReLU -> Linear -> ReLU -> Linear
     """
 
     def __init__(
@@ -27,11 +28,10 @@ class AudioProjector(nn.Module):
         hidden_dim: int = 2048,
         output_dim: int = 4096,
         conv_kernel_size: int = 5,
-        dropout: float = 0.1,
     ):
         super().__init__()
 
-        # Conv1D để downsampling
+        # Conv1D for downsampling
         self.conv = nn.Conv1d(
             in_channels=input_dim,
             out_channels=input_dim,
@@ -40,19 +40,14 @@ class AudioProjector(nn.Module):
             padding=0,
         )
 
-        # FFN với dropout
         self.linear1 = nn.Linear(input_dim, hidden_dim)
-        self.activation = nn.GELU()
-        self.dropout1 = nn.Dropout(dropout)
-
+        self.relu1 = nn.ReLU()
         self.linear2 = nn.Linear(hidden_dim, output_dim)
-        self.dropout2 = nn.Dropout(dropout)
-
-        self.layer_norm = nn.LayerNorm(output_dim)
+        self.relu2 = nn.ReLU()
 
         logger.info(
             f"Initialized AudioProjector: {input_dim} -> {hidden_dim} -> {output_dim}, "
-            f"Conv kernel={conv_kernel_size}, dropout={dropout}"
+            f"Conv kernel={conv_kernel_size}"
         )
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
@@ -61,19 +56,16 @@ class AudioProjector(nn.Module):
                 f"audio_features must be 3D (batch, seq, feat), got shape {audio_features.shape}"
             )
 
-        # Transpose cho Conv1D
+        # Conv1D downsampling
         x = audio_features.transpose(1, 2)
         x = self.conv(x)
         x = x.transpose(1, 2)
 
-        # FFN
+        # FFN with ReLU (matching reference EncoderProjectorCov1d)
+        x = self.relu1(x)
         x = self.linear1(x)
-        x = self.activation(x)
-        x = self.dropout1(x)
-
+        x = self.relu2(x)
         x = self.linear2(x)
-        x = self.dropout2(x)
-        x = self.layer_norm(x)
 
         return x
 
@@ -87,7 +79,6 @@ class CTCAssistedLLMASR(nn.Module):
         freeze_llm: bool = True,
         use_lora: bool = False,  # Added LoRA flag
         use_gradient_checkpointing: bool = False,
-        dropout: float = 0.1,
     ):
         super().__init__()
 
@@ -148,13 +139,12 @@ class CTCAssistedLLMASR(nn.Module):
                 # self.llm.print_trainable_parameters()
                 pass
 
-        # 4. Audio Projector
+        # 4. Audio Projector (matching reference: ReLU, no dropout, no LayerNorm)
         self.projector = AudioProjector(
             input_dim=self.encoder_hidden_size,
             hidden_dim=2048,
             output_dim=self.llm_hidden_size,
             conv_kernel_size=self.conv_stride,
-            dropout=dropout,
         )
 
         # 5. Gradient checkpointing

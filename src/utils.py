@@ -72,7 +72,7 @@ def generate_training_hotwords(
 
     # Với xác suất p_keep, lấy hotwords từ transcription
     if random.random() < p_keep:
-        words = transcription.lower().split()
+        words = transcription.split()
 
         if len(words) > 0:
             k = random.randint(1, n_phrases)

@@ -27,7 +27,7 @@ training:
   save_total_limit: 2
   log_every: 100
   num_workers: 4
-  pin_memory: false
+  pin_memory:
 
 data:
   sample_rate: 16000

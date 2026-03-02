@@ -25,7 +25,7 @@ if [ ! -f "$conf" ]; then
 fi
 
 # Create output directory if not exists
-output_dir="exp/wavlm-ft-ctc_llm_libri_eval_bs4_no-cut-prompt"
+output_dir="exp/wavlm-ft-ctc_llm_libri_bs4_new-projector_batch-hotword_new-prompt_test-ckpt"
 log_dir="$output_dir/logs"
 mkdir -p $output_dir/checkpoints
 mkdir -p "$log_dir"
@@ -50,7 +50,7 @@ rotate_file() {
 rotate_file "$log_dir/training.log"
 rotate_file "$log_dir/eval.log"
 # Load checkpoint
-checkpoint=""
+checkpoint="/home/25/minh/CTC-assisted-ASR-LLM/exp/wavlm-ft-ctc_llm_libri_bs4_new-projector_batch-hotword_new-prompt/checkpoints/checkpoint_step_20000.pt"
 if [ -n "$checkpoint" ]; then
     echo "Resuming training from checkpoint: $checkpoint"
 fi
@@ -61,8 +61,10 @@ CUDA_VISIBLE_DEVICES=$USE_DEVICE python src/train.py \
     --config $conf \
     --data-dir $data_dir \
     --output-dir $output_dir \
-    ${checkpoint:+--checkpoint $checkpoint} \
+    ${checkpoint:+--load-checkpoint $checkpoint} "$@"
 
+rm -rf pymp*
+rm -rf tmp*
 echo ""
 echo "========================================"
 echo "Training completed!"

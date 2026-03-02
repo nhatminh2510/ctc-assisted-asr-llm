@@ -26,6 +26,7 @@ from src.utils import (
     setup_logging,
     switch_log_file,
     set_seed,
+    generate_training_hotwords,
 )
 from src.hotword_filter import create_prompt_with_hotwords
 from src.dataset import KaldiDataset, LibriSpeechDataset
@@ -38,9 +39,31 @@ def get_collate_fn(
     decoder_processor,
     mode: str = "train",
     device: str = "cuda",
+    p_keep: float = 0.5,
+    n_order_max: int = 4,
+    n_phrases: int = 1,
 ):
-    def collate_fn_cpu(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Collate: pad audio + tạo attention mask + tokenize transcriptions"""
+    """Create collate function with per-batch shared hotword generation (matching reference)."""
+
+    def _generate_batch_hotwords(batch):
+        """Generate shared hotwords from all batch transcriptions (per-batch).
+
+        Each sample contributes one n-gram with probability p_keep.
+        All n-grams are collected into a single shared hotword list for the whole batch.
+        """
+        selected_ngrams_list = []
+        for sample in batch:
+            ngrams = generate_training_hotwords(
+                sample["transcription"],
+                p_keep=p_keep,
+                n_phrases=n_phrases,
+                n_order_max=n_order_max,
+            )
+            selected_ngrams_list.extend(ngrams)
+        return selected_ngrams_list
+
+    def _build_batch(batch, to_device=None):
+        # 1. Process audio
         encoder_inputs = encoder_processor(
             [sample["audio"] for sample in batch],
             sampling_rate=16000,
@@ -48,27 +71,32 @@ def get_collate_fn(
             return_attention_mask=True,
             padding=True,
         )
-        # Calculate prompt lengths for masking
-        prompts_only = [
-            create_prompt_with_hotwords(sample["hotwords"]) for sample in batch
-        ]
-        prompt_only_inputs = decoder_processor(
-            prompts_only,
-            return_tensors="pt",
-            padding=True,
-        )
-        prompt_lengths = (prompt_only_inputs.attention_mask == 1).sum(dim=1).tolist()
+        if to_device:
+            encoder_inputs = encoder_inputs.to(to_device)
 
-        # Full prompt + transcription (for train loss / eval loss)
-        full_prompts = [
-            create_prompt_with_hotwords(sample["hotwords"], sample["transcription"])
+        # 2. Generate per-batch shared hotwords (matching reference collator)
+        batch_hotwords = _generate_batch_hotwords(batch)
+
+        # 3. Create shared prompt (same for all samples in batch)
+        shared_prompt_only = create_prompt_with_hotwords(batch_hotwords)
+
+        # 4. Compute prompt_length (same for all samples since prompt is shared)
+        prompt_ids = decoder_processor.encode(shared_prompt_only)
+        prompt_length = len(prompt_ids)
+        prompt_lengths = [prompt_length] * len(batch)
+
+        # 5. Create full text: shared_prompt + individual transcription + EOS
+        full_texts = [
+            create_prompt_with_hotwords(batch_hotwords, sample["transcription"])
             for sample in batch
         ]
         full_decoder_inputs = decoder_processor(
-            full_prompts,
+            full_texts,
             return_tensors="pt",
             padding=True,
         )
+        if to_device:
+            full_decoder_inputs = full_decoder_inputs.to(to_device)
 
         if mode == "train":
             return {
@@ -79,6 +107,15 @@ def get_collate_fn(
                 "prompt_lengths": prompt_lengths,
             }
         elif mode == "eval":
+            # Prompt-only for generation (same prompt for all samples)
+            prompt_only_inputs = decoder_processor(
+                [shared_prompt_only] * len(batch),
+                return_tensors="pt",
+                padding=True,
+            )
+            if to_device:
+                prompt_only_inputs = prompt_only_inputs.to(to_device)
+
             return {
                 "input_values": encoder_inputs.input_values,
                 # Full prompt+transcription for loss computation
@@ -96,61 +133,11 @@ def get_collate_fn(
                 f"Invalid collate mode: {mode}. Expected 'train' or 'eval'."
             )
 
-    def collate_fn_gpu(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        encoder_inputs = encoder_processor(
-            [sample["audio"] for sample in batch],
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-            padding=True,
-        ).to("cuda")
+    def collate_fn_cpu(batch):
+        return _build_batch(batch, to_device=None)
 
-        prompts_only = [
-            create_prompt_with_hotwords(sample["hotwords"]) for sample in batch
-        ]
-        prompt_only_inputs = decoder_processor(
-            prompts_only,
-            return_tensors="pt",
-            padding=True,
-        ).to("cuda")
-        prompt_lengths = (prompt_only_inputs.attention_mask == 1).sum(dim=1).tolist()
-
-        # Full prompt + transcription (for train loss / eval loss)
-        full_prompts = [
-            create_prompt_with_hotwords(sample["hotwords"], sample["transcription"])
-            for sample in batch
-        ]
-        full_decoder_inputs = decoder_processor(
-            full_prompts,
-            return_tensors="pt",
-            padding=True,
-        ).to("cuda")
-
-        if mode == "train":
-            return {
-                "input_values": encoder_inputs.input_values,
-                "input_ids": full_decoder_inputs.input_ids,
-                "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": full_decoder_inputs.attention_mask,
-                "prompt_lengths": prompt_lengths,
-            }
-        elif mode == "eval":
-            return {
-                "input_values": encoder_inputs.input_values,
-                # Full prompt+transcription for loss computation
-                "input_ids": full_decoder_inputs.input_ids,
-                "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": full_decoder_inputs.attention_mask,
-                # Prompt-only for generation
-                "generate_input_ids": prompt_only_inputs.input_ids,
-                "generate_attention_mask": prompt_only_inputs.attention_mask,
-                "prompt_lengths": prompt_lengths,
-                "transcription": [sample["transcription"] for sample in batch],
-            }
-        else:
-            raise ValueError(
-                f"Invalid collate mode: {mode}. Expected 'train' or 'eval'."
-            )
+    def collate_fn_gpu(batch):
+        return _build_batch(batch, to_device="cuda")
 
     if device == "cuda":
         return collate_fn_gpu
@@ -192,12 +179,14 @@ class Trainer:
         train_dataset: Dataset,
         val_dataset: Optional[Dataset] = None,
         config: Optional[Dict[str, Any]] = None,
+        data_config: Optional[Dict[str, Any]] = None,
         output_dir: Optional[str] = None,
     ):
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.config = config
+        self.data_config = data_config or {}
 
         self.device = torch.device("cuda")
         self.model.to(self.device)
@@ -228,6 +217,9 @@ class Trainer:
                 self.model.decoder_processor,
                 mode="train",
                 device=self.data_loading_device,
+                p_keep=self.data_config.get("p_keep", 0.5),
+                n_order_max=self.data_config.get("n_order_max", 4),
+                n_phrases=self.data_config.get("n_phrases", 1),
             ),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
@@ -243,6 +235,9 @@ class Trainer:
                     self.model.decoder_processor,
                     mode="eval",
                     device=self.data_loading_device,
+                    p_keep=self.data_config.get("p_keep", 0.5),
+                    n_order_max=self.data_config.get("n_order_max", 4),
+                    n_phrases=self.data_config.get("n_phrases", 1),
                 ),
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,
@@ -280,6 +275,7 @@ class Trainer:
         # State
         self.global_step = 0
         self.best_loss = float("inf")
+        self.best_wer = float("inf")
 
         if config.get("checkpoint_dir") is None:
             self.checkpoint_dir = None
@@ -395,8 +391,6 @@ class Trainer:
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
                 do_sample=do_sample,
-                repetition_penalty=1.2,
-                no_repeat_ngram_size=3,
             )
 
             predicted_texts = self.model.decoder_processor.batch_decode(
@@ -407,7 +401,7 @@ class Trainer:
             refs.extend(batch["transcription"])
             logger.info(
                 f"Batch {num_batches}\n"
-                f"Predicted: {predicted_texts}\n"
+                f"Hyps: {predicted_texts}\n"
                 f"Refs: {batch['transcription']}"
             )
 
@@ -527,20 +521,36 @@ class Trainer:
                             logger.info(
                                 f"Step {self.global_step} | Eval Loss: {val_loss:.4f} | WER: {wer:.4f}"
                             )
-                            if val_loss < self.best_loss:
-                                self.best_loss = val_loss
-                                best_path = self.checkpoint_dir / "best_model.pt"
+                            # if val_loss < self.best_loss:
+                            #     self.best_loss = val_loss
+                            #     best_path = self.checkpoint_dir / "best_model.pt"
+                            #     save_checkpoint(
+                            #         self.model,
+                            #         self.optimizer,
+                            #         0,
+                            #         self.global_step,
+                            #         val_loss,
+                            #         str(best_path),
+                            #         is_best=True,
+                            #     )
+                            #     logger.info(
+                            #         f"New best model (loss) at step {self.global_step}"
+                            #     )
+                            if wer < self.best_wer:
+                                self.best_wer = wer
+                                best_wer_path = (
+                                    self.checkpoint_dir / "best_wer_model.pt"
+                                )
                                 save_checkpoint(
                                     self.model,
                                     self.optimizer,
                                     0,
                                     self.global_step,
                                     val_loss,
-                                    str(best_path),
-                                    is_best=True,
+                                    str(best_wer_path),
                                 )
                                 logger.info(
-                                    f"New best model at step {self.global_step}"
+                                    f"New best WER model at step {self.global_step}: WER={wer:.4f}"
                                 )
                         self.model.train()
                         self.model.encoder.eval()
@@ -676,6 +686,7 @@ def main():
         train_dataset,
         val_dataset=val_dataset,
         config=train_config,
+        data_config=data_config,
         output_dir=args.output_dir,
     )
 
@@ -704,6 +715,7 @@ def main():
             "status": "completed",
             "max_steps": train_config["max_steps"],
             "best_loss": float(trainer.best_loss),
+            "best_wer": float(trainer.best_wer),
             "results_dir": str(output_dir),
         },
         str(output_dir / "training_info.yaml"),

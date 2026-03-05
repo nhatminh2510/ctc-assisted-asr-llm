@@ -1,5 +1,5 @@
 import torch
-import editdistance
+import Levenshtein
 from typing import List, Set, Dict, Tuple, Optional
 from collections import defaultdict
 import logging
@@ -8,187 +8,48 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-
-class CTCDecoder:
-    """
-    CTC Decoder sử dụng thuật toán Viterbi để tìm phiên âm tối ưu nhất.
-
-    Args:
-        vocab (List[str]): Danh sách các ký tự trong từ vựng
-        blank_id (int): ID của blank token trong CTC
-    """
-
-    def __init__(self, vocab: Optional[List[str]] = None, blank_id: int = 0):
-        if vocab is None:
-            # Tầo vocab mặc định: blank + space + a-z + apostrophe
-            self.vocab = ["<blank>", " "] + list(string.ascii_lowercase) + ["'"]
-        else:
-            self.vocab = vocab
-
-        self.blank_id = blank_id
-        self.char_to_id = {char: idx for idx, char in enumerate(self.vocab)}
-        self.id_to_char = {idx: char for idx, char in enumerate(self.vocab)}
-
-        logger.info(f"Initialized CTCDecoder with vocab size: {len(self.vocab)}")
-
-    def greedy_decode(self, logits: torch.Tensor) -> str:
-        """
-        Giải mã CTC logits thành văn bản sử dụng greedy decoding.
-
-        Args:
-            logits: Tensor shape (sequence_length, vocab_size) - Log probabilities từ CTC
-
-        Returns:
-            decoded_text: String phiên âm đã giải mã
-        """
-        # Greedy decoding: lấy token có xác suất cao nhất tại mỗi timestep
-        predicted_ids = torch.argmax(logits, dim=-1).cpu().tolist()
-
-        # Loại bỏ các token trùng lặp và blank tokens
-        decoded_chars = []
-        prev_id = None
-
-        for token_id in predicted_ids:
-            # Bỏ qua blank token
-            if token_id == self.blank_id:
-                prev_id = None
-                continue
-
-            # Bỏ qua token trùng lặp liên tiếp
-            if token_id == prev_id:
-                continue
-
-            # Thêm ký tự vào kết quả
-            if token_id < len(self.vocab):
-                decoded_chars.append(self.id_to_char[token_id])
-
-            prev_id = token_id
-
-        decoded_text = "".join(decoded_chars).strip()
-        return decoded_text
-
-    def viterbi_decode(self, logits: torch.Tensor) -> str:
-        """
-        Giải mã CTC logits thành văn bản sử dụng thuật toán Viterbi.
-
-        Thuật toán Viterbi tìm chuỗi ký tự có xác suất cao nhất bằng cách:
-        1. Duy trì bảng xác suất cho mỗi trạng thái tại mỗi bước thời gian
-        2. Theo dõi đường dẫn ngược để tái tạo chuỗi tối ưu
-        3. Loại bỏ blank tokens và các token trùng lặp liên tiếp
-
-        Args:
-            logits: Tensor shape (sequence_length, vocab_size) - Log probabilities từ CTC
-
-        Returns:
-            decoded_text: String phiên âm đã giải mã
-        """
-        # Chuyển logits thành numpy cho tính toán Viterbi
-        if isinstance(logits, torch.Tensor):
-            logits_np = logits.cpu().detach().numpy()
-        else:
-            logits_np = logits
-
-        sequence_length, vocab_size = logits_np.shape
-
-        # Khởi tạo bảng Viterbi
-        # viterbi[t, k] = xác suất cao nhất của chuỗi kết thúc tại token k ở bước t
-        viterbi = np.full((sequence_length, vocab_size), -np.inf)
-        backpointer = np.zeros((sequence_length, vocab_size), dtype=np.int32)
-
-        # Khởi tạo bước thời gian đầu tiên
-        viterbi[0, :] = logits_np[0, :]
-
-        # Điền bảng Viterbi từ trước đến sau
-        for t in range(1, sequence_length):
-            for k in range(vocab_size):
-                # Xác suất chuyển đến token k từ bất kỳ token nào ở bước trước
-                # Trong CTC, bất kỳ token nào cũng có thể chuyển đến bất kỳ token nào
-                prev_probs = viterbi[t - 1, :] + logits_np[t, k]
-
-                # Tìm token trước có xác suất cao nhất
-                best_prev_token = np.argmax(prev_probs)
-                viterbi[t, k] = prev_probs[best_prev_token]
-                backpointer[t, k] = best_prev_token
-
-        # Tìm token với xác suất cao nhất ở bước cuối cùng
-        last_token = np.argmax(viterbi[sequence_length - 1, :])
-
-        # Tái tạo chuỗi tối ưu bằng backtracking
-        path = []
-        current_token = last_token
-
-        for t in range(sequence_length - 1, -1, -1):
-            path.append(current_token)
-            if t > 0:
-                current_token = backpointer[t, current_token]
-
-        path.reverse()
-
-        # Post-processing: loại bỏ blank tokens và tokens trùng lặp liên tiếp
-        decoded_chars = []
-        prev_token = None
-
-        for token_id in path:
-            # Bỏ qua blank token
-            if token_id == self.blank_id:
-                prev_token = None
-                continue
-
-            # Bỏ qua token trùng lặp liên tiếp
-            if token_id == prev_token:
-                continue
-
-            # Thêm ký tự vào kết quả
-            if token_id < len(self.vocab):
-                decoded_chars.append(self.id_to_char[token_id])
-
-            prev_token = token_id
-
-        decoded_text = "".join(decoded_chars).strip()
-        return decoded_text
-
-    def decode(self, logits: torch.Tensor) -> str:
-        """
-        Giải mã CTC logits thành văn bản sử dụng Viterbi algorithm.
-
-        Args:
-            logits: Tensor shape (sequence_length, vocab_size) - Log probabilities từ CTC
-
-        Returns:
-            decoded_text: String phiên âm đã giải mã
-        """
-        return self.viterbi_decode(logits)
-
-    def batch_decode(self, logits_batch: torch.Tensor) -> List[str]:
-        """
-        Giải mã batch các CTC logits.
-
-        Args:
-            logits_batch: Tensor shape (batch_size, sequence_length, vocab_size)
-
-        Returns:
-            decoded_texts: List các phiên âm đã giải mã
-        """
-        return [self.decode(logits) for logits in logits_batch]
-
-
 class HotwordFilter:
     """
-    Thuật toán lọc hotwords để chọn ra các từ phù hợp nhất từ danh sách hotwords lớn.
+    Filter hotwords from a large bias list using CTC pseudo-labels.
+
+    Implements the filtering algorithm from the paper:
+      1. Build bigram (n-gram) index from bias list
+      2. Remove common words from CTC output
+      3. Retrieve candidate hotwords via n-gram overlap
+      4. Score candidates using Levenshtein.ratio
+      5. Select top-K words above probability_threshold
+
+    Two scoring strategies (matching reference code):
+      - Whole-sentence scoring: score each candidate against the full CTC sentence
+      - Per-word scoring: score each candidate against individual rare words
 
     Args:
-        common_words_path (str): Đường dẫn đến file chứa danh sách từ phổ biến
-        n_gram (int): Kích thước n-gram cho index dictionary (mặc định: 2)
-        top_k (int): Số hotwords tối đa được giữ lại (mặc định: 10)
+        common_words_path: Path to file with common (frequent) words, one per line
+        n_gram: N-gram size for the index (default: 2 = bigram)
+        word_num: Maximum number of hotwords to keep (default: 15)
+        probability_threshold: Minimum Levenshtein.ratio to accept (default: 0.9)
+        per_word_scoring: If True, use per-word scoring; else whole-sentence (default: True)
+
+    Reference: https://github.com/X-LANCE/SLAM-LLM/tree/main/examples/contextual_asr
     """
 
     def __init__(
-        self, common_words_path: Optional[str] = None, n_gram: int = 2, top_k: int = 10
+        self,
+        common_words_path: Optional[str] = None,
+        n_gram: int = 2,
+        word_num: int = 15,
+        probability_threshold: float = 0.9,
+        per_word_scoring: bool = True,
     ):
         self.n_gram = n_gram
-        self.top_k = top_k
+        self.word_num = word_num
+        self.probability_threshold = probability_threshold
+        self.per_word_scoring = per_word_scoring
 
-        # Load danh sách từ phổ biến
+        # Backward compat alias
+        self.top_k = word_num
+
+        # Load common words
         self.common_words: Set[str] = set()
         if common_words_path:
             try:
@@ -198,7 +59,6 @@ class HotwordFilter:
             except FileNotFoundError:
                 logger.warning(f"Common words file not found: {common_words_path}")
 
-        # Nếu không có file, sử dụng một số từ phổ biến cơ bản
         if not self.common_words:
             self.common_words = self._get_default_common_words()
             logger.info(f"Using default {len(self.common_words)} common words")
@@ -355,78 +215,151 @@ class HotwordFilter:
         self, rare_words: List[str], ngram_index: Dict[str, Set[str]]
     ) -> Set[str]:
         """
-        Truy xuất các hotwords ứng viên dựa trên các từ hiếm.
+        Retrieve candidate hotwords based on n-gram overlap with rare words.
 
         Args:
-            rare_words: Danh sách các từ hiếm
-            ngram_index: Từ điển chỉ mục n-gram
+            rare_words: Rare words extracted from CTC output
+            ngram_index: N-gram index built from the bias list
 
         Returns:
-            candidates: Tập hợp các hotwords ứng viên
+            candidates: Set of candidate hotwords
         """
         candidates = set()
 
         for word in rare_words:
-            # Tạo tất cả n-grams của word
             for i in range(len(word) - self.n_gram + 1):
                 ngram = word[i : i + self.n_gram]
-                # Truy xuất hotwords chứa n-gram này
                 if ngram in ngram_index:
                     candidates.update(ngram_index[ngram])
 
         return candidates
 
-    def match_hotwords(self, rare_words: List[str], candidates: Set[str]) -> List[str]:
+    def score_candidates_whole_sentence(
+        self, ctc_sentence: str, candidates: Set[str]
+    ) -> List[Tuple[str, float]]:
         """
-        Đối sánh và lựa chọn hotwords phù hợp nhất cho mỗi từ hiếm.
+        Score candidates against the whole CTC sentence using Levenshtein.ratio.
+
+        For each candidate, find the best matching substring in the sentence.
 
         Args:
-            rare_words: Danh sách các từ hiếm từ phiên âm sơ bộ
-            candidates: Tập hợp các hotwords ứng viên
+            ctc_sentence: Full CTC decoded sentence (lowercased)
+            candidates: Set of candidate hotwords
 
         Returns:
-            matched_hotwords: Danh sách các hotwords được chọn (tối đa top_k)
+            List of (candidate, score) tuples, sorted by score descending
         """
-        matched_hotwords = set()
-        candidates_list = list(candidates)
+        scored = []
+        sentence_lower = ctc_sentence.lower()
 
-        # Với mỗi từ hiếm, tìm hotword có edit distance nhỏ nhất
-        for rare_word in rare_words:
-            if not candidates_list:
+        for candidate in candidates:
+            cand_lower = candidate.lower()
+            # Slide a window over the sentence to find best match
+            best_score = 0.0
+            cand_len = len(cand_lower)
+
+            if cand_len == 0:
                 continue
 
-            # Tính edit distance đến tất cả các candidates
-            distances = [
-                (editdistance.eval(rare_word, candidate), candidate)
-                for candidate in candidates_list
-            ]
+            # Check word-level substrings of similar length
+            words = sentence_lower.split()
+            # Also check character-level windows for robustness
+            for i in range(len(sentence_lower) - cand_len + 1):
+                substr = sentence_lower[i : i + cand_len]
+                score = Levenshtein.ratio(cand_lower, substr)
+                best_score = max(best_score, score)
 
-            # Chọn candidate có distance nhỏ nhất
-            distances.sort(key=lambda x: x[0])
-            best_match = distances[0][1]
-            matched_hotwords.add(best_match)
+            # Also check each word directly
+            for word in words:
+                score = Levenshtein.ratio(cand_lower, word)
+                best_score = max(best_score, score)
 
-        # Giới hạn số lượng hotwords trả về
-        return list(matched_hotwords)[: self.top_k]
+            scored.append((candidate, best_score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def score_candidates_per_word(
+        self, rare_words: List[str], candidates: Set[str]
+    ) -> List[Tuple[str, float]]:
+        """
+        Score candidates against individual rare words (per-word strategy).
+
+        For each rare word, find the best matching candidate.
+        This matches the reference `score_candidates_for_each_word()`.
+
+        Args:
+            rare_words: Rare words from CTC output
+            candidates: Set of candidate hotwords
+
+        Returns:
+            List of (candidate, score) tuples, sorted by score descending
+        """
+        # For each rare word, find best candidate match
+        best_per_candidate: Dict[str, float] = {}
+
+        for rare_word in rare_words:
+            for candidate in candidates:
+                score = Levenshtein.ratio(rare_word.lower(), candidate.lower())
+                if candidate not in best_per_candidate:
+                    best_per_candidate[candidate] = score
+                else:
+                    best_per_candidate[candidate] = max(
+                        best_per_candidate[candidate], score
+                    )
+
+        scored = list(best_per_candidate.items())
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def match_hotwords(self, rare_words: List[str], candidates: Set[str]) -> List[str]:
+        """
+        Match and select the best hotwords using Levenshtein.ratio scoring.
+
+        Applies probability_threshold and word_num limits.
+
+        Args:
+            rare_words: Rare words from CTC output
+            candidates: Candidate hotwords from n-gram retrieval
+
+        Returns:
+            Filtered hotwords (max word_num items)
+        """
+        if not candidates:
+            return []
+
+        if self.per_word_scoring:
+            scored = self.score_candidates_per_word(rare_words, candidates)
+        else:
+            ctc_sentence = " ".join(rare_words)
+            scored = self.score_candidates_whole_sentence(ctc_sentence, candidates)
+
+        # Filter by threshold and limit
+        filtered = []
+        for candidate, score in scored:
+            if score >= self.probability_threshold and len(filtered) < self.word_num:
+                filtered.append(candidate)
+
+        return filtered
 
     def filter_hotwords(
         self, inference_sentence: str, hotwords: List[str]
     ) -> List[str]:
         """
-        Phương thức chính để lọc hotwords.
+        Main filtering method.
+
+        Pipeline:
+          1. Build n-gram index from bias list
+          2. Remove common words from CTC sentence
+          3. Retrieve candidates via n-gram overlap
+          4. Score and select top hotwords
 
         Args:
-            inference_sentence: Câu phiên âm sơ bộ từ CTC decoder
-            hotwords: Danh sách tất cả các hotwords (bao gồm nhiều từ gây nhiễu)
+            inference_sentence: CTC decoded text (pseudo-label)
+            hotwords: Full bias list (true hotwords + distractors)
 
         Returns:
-            filtered_hotwords: Danh sách hotwords đã được lọc (tối đa top_k)
-
-        Thuật toán:
-        1. Xây dựng từ điển n-gram index
-        2. Loại bỏ từ phổ biến từ inference sentence
-        3. Truy xuất candidates dựa trên từ hiếm
-        4. Đối sánh và chọn hotwords tốt nhất
+            Filtered hotwords (max word_num items above threshold)
         """
         if not hotwords:
             logger.warning("Empty hotwords list provided")
@@ -436,29 +369,30 @@ class HotwordFilter:
             logger.warning("Empty inference sentence provided")
             return []
 
-        # Bước 1: Xây dựng n-gram index
+        # Step 1: Build n-gram index
         ngram_index = self.build_ngram_index(hotwords)
 
-        # Bước 2: Loại bỏ từ phổ biến
+        # Step 2: Remove common words
         rare_words = self.remove_common_words(inference_sentence)
 
         if not rare_words:
             logger.info("No rare words found in inference sentence")
             return []
 
-        # Bước 3: Truy xuất candidates
+        # Step 3: Retrieve candidates
         candidates = self.retrieve_candidates(rare_words, ngram_index)
 
         if not candidates:
             logger.info("No candidates retrieved")
             return []
 
-        # Bước 4: Đối sánh và chọn hotwords
+        # Step 4: Score and select
         filtered_hotwords = self.match_hotwords(rare_words, candidates)
 
         logger.info(
             f"Filtered {len(filtered_hotwords)} hotwords from "
-            f"{len(hotwords)} total hotwords"
+            f"{len(hotwords)} total (threshold={self.probability_threshold}, "
+            f"max={self.word_num})"
         )
 
         return filtered_hotwords

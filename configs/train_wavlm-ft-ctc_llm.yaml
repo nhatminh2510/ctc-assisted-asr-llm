@@ -36,9 +36,10 @@ data:
   n_order_max: 4
 
 hotword_filter:
-  common_words_path: data/common_words_5k.txt
   n_gram: 2
   top_k: 10
+  probability-threshold: 0.9
+  word_num: 15
 
 inference:
   max_new_tokens: 256

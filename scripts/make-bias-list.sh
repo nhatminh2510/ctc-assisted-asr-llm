@@ -11,16 +11,16 @@
 
 set -e
 
-DATA_DIR="${DATA_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/data/LibriSpeech}"
-PROCESSED_DATA_DIR="${PROCESSED_DATA_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/data/processed}"
-mkdir -p "$PROCESSED_DATA_DIR"
-OUTPUT_DIR="${OUTPUT_DIR:-${PROCESSED_DATA_DIR}/LibriSpeech/hotwords}"
+DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech}"
+LEXICON_DIR="${LEXICON_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon}"
+mkdir -p "$LEXICON_DIR"
+OUTPUT_DIR="${OUTPUT_DIR:-${LEXICON_DIR}/LibriSpeech/hotwords}"
 
 # Test splits to create bias lists for 
 TEST_SPLITS="${TEST_SPLITS:-test-clean test-other}"
 
 # Pre-computed word frequency file (TSV: word\tcount)
-WORD_FREQ_PATH="${WORD_FREQ_PATH:-${PROCESSED_DATA_DIR}/all_words.count.org.txt}"
+WORD_FREQ_PATH="${WORD_FREQ_PATH:-${LEXICON_DIR}/all_words.count.org.txt}"
 
 # Number of distractor (non-target) hotwords per utterance
 NUM_DISTRACTORS="${NUM_DISTRACTORS:-100}"
@@ -28,11 +28,11 @@ NUM_DISTRACTORS="${NUM_DISTRACTORS:-100}"
 SEED="${SEED:-42}"
 
 # Common words file (top-k most frequent training words)
-COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-${PROCESSED_DATA_DIR}/LibriSpeech/common_words_5k.txt}"
+COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-${LEXICON_DIR}/LibriSpeech/common_words_5k.txt}"
 COMMON_WORDS_TOP_K="${COMMON_WORDS_TOP_K:-5000}"
 
 # Output path for all rare words
-ALL_RARE_WORDS_PATH="${ALL_RARE_WORDS_PATH:-${PROCESSED_DATA_DIR}/LibriSpeech/all_rare_words.txt}"
+ALL_RARE_WORDS_PATH="${ALL_RARE_WORDS_PATH:-${LEXICON_DIR}/LibriSpeech/all_rare_words.txt}"
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -58,7 +58,7 @@ echo "Rare words:       $ALL_RARE_WORDS_PATH"
 echo "========================================"
 echo ""
 
-python3 scripts/create_bias_list.py \
+python3 pyscripts/create_bias_list.py \
     --data-dir "$DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --test-splits $TEST_SPLITS \

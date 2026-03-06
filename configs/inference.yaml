@@ -1,0 +1,11 @@
+hotword_filter:
+  n_gram: 2
+  top_k: 10
+  probability-threshold: 0.9
+  word_num: 15
+
+inference:
+  max_new_tokens: 256
+  num_beams: 4
+  temperature: 1.0
+  use_hotword_filtering: true

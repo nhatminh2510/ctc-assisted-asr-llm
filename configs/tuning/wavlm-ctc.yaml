@@ -1,0 +1,82 @@
+# =============================================================================
+# WavLM CTC Fine-tuning Configuration
+# Based on: https://arxiv.org/pdf/2411.06437
+# =============================================================================
+
+# -- Model --
+model:
+  name: microsoft/wavlm-large
+  vocab_special_tokens: ["<pad>", "<unk>", "<s>", "</s>"]
+  word_delimiter_token: "|"
+  ctc_loss_reduction: mean
+
+# -- Freeze strategy --
+# Phase 1 (step 0 → unfreeze_step): only lm_head is trainable
+# Phase 2 (unfreeze_step → end):    all except feature_encoder
+freeze:
+  feature_encoder: true          # always frozen (CNN feature extractor)
+  unfreeze_step: 10000           # step to unfreeze transformer layers
+
+# -- Learning-rate schedule --
+# 3-phase: linear warmup → constant → exponential decay
+schedule:
+  max_steps: 80000
+  warmup_steps: 8000
+  constant_steps: 32000
+  decay_steps: 40000             # max_steps - warmup - constant
+  decay_final_ratio: 0.05        # LR decays to peak_lr * this
+
+# -- Optimizer (AdamW) --
+optimizer:
+  peak_lr: 3.0e-5
+  weight_decay: 0.005
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+# -- Batch / accumulation --
+training:
+  batch_size: 8                  # per-device
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  train_sampling_strategy: group_by_length          # bucket samples by audio length
+
+# -- Mixed precision --
+precision:
+  fp16: false                    # WavLM can be unstable with fp16
+  bf16: false                    # set true if GPU supports bf16
+
+# -- Data --
+data:
+  data_dir: /home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech
+  sampling_rate: 16000
+  vocab_sample_size: 10000       # samples used to build vocab
+  train_splits:
+    - train-clean-100
+    - train-clean-360
+    - train-other-500
+  val_splits:
+    - dev-clean
+    - dev-other
+
+# -- Evaluation & checkpointing --
+eval:
+  eval_steps: 5000
+  logging_steps: 100
+  save_steps: 10000
+  save_total_limit: 2
+  metric_for_best_model: wer
+  greater_is_better: false
+  load_best_model_at_end: true
+
+# -- Dataloader / performance --
+dataloader:
+  num_workers: 16
+  pin_memory: true
+
+# -- Output --
+output:
+  output_dir: exp/wavlm-ft-ctc
+  report_to: [tensorboard]
+
+# -- Reproducibility --
+seed: 42

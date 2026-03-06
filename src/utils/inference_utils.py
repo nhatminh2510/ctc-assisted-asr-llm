@@ -1,0 +1,124 @@
+import json
+import logging
+from pathlib import Path
+from typing import List, Dict, Any
+
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Bias list / CTC file loaders
+# ---------------------------------------------------------------------------
+def load_bias_list(bias_list_json: str) -> Dict[str, Dict]:
+    """
+    Load per-utterance bias list JSON.
+
+    Returns a dict: utt_id -> {
+        "bias_list": [...],
+        "true_hotwords": [...],
+        "transcription": "...",
+    }
+    """
+    with open(bias_list_json, "r") as f:
+        data = json.load(f)
+    result = {}
+    for entry in data:
+        uid = entry["utt_id"]
+        result[uid] = {
+            "bias_list": entry.get("bias_list", []),
+            "true_hotwords": entry.get("true_hotwords", []),
+            "transcription": entry.get("transcription", ""),
+        }
+    logger.info(f"Loaded bias list for {len(result)} utterances from {bias_list_json}")
+    return result
+
+
+def load_bias_lists(paths: List[str]) -> Dict[str, Dict]:
+    """Load and merge multiple bias list JSONs (one per split)."""
+    merged: Dict[str, Dict] = {}
+    for p in paths:
+        merged.update(load_bias_list(p))
+    logger.info(
+        f"Merged bias lists: {len(merged)} utterances from {len(paths)} file(s)"
+    )
+    return merged
+
+
+def load_ctc_file(ctc_path: str) -> Dict[str, str]:
+    """
+    Load CTC pseudo-label file (TSV: utt_id\\tctc_text).
+
+    Returns dict: utt_id -> ctc_decoded_text
+    """
+    results: Dict[str, str] = {}
+    with open(ctc_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                results[parts[0]] = parts[1]
+    logger.info(f"Loaded {len(results)} CTC decodes from {ctc_path}")
+    return results
+
+
+def load_ctc_files(paths: List[str]) -> Dict[str, str]:
+    """Load and merge multiple CTC decode files (one per split)."""
+    merged: Dict[str, str] = {}
+    for p in paths:
+        merged.update(load_ctc_file(p))
+    logger.info(f"Merged CTC files: {len(merged)} utterances from {len(paths)} file(s)")
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Result I/O
+# ---------------------------------------------------------------------------
+def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
+    """Persist evaluation results to *output_dir*."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # 1. Summary JSON
+    summary = {
+        "split": split,
+        "wer": results["wer"],
+        "num_samples": len(results["hyps"]),
+    }
+    summary_path = out / f"{split}_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    logger.info(f"Summary saved to {summary_path}")
+
+    # 2. Per-utterance details
+    details = []
+    for uid, hyp, ref, raw_hyp, raw_ref in zip(
+        results["utt_ids"],
+        results["hyps"],
+        results["refs"],
+        results["raw_hyps"],
+        results["raw_refs"],
+    ):
+        details.append(
+            {
+                "utt_id": uid,
+                "hyp": hyp,
+                "ref": ref,
+                "raw_hyp": raw_hyp,
+                "raw_ref": raw_ref,
+            }
+        )
+    details_path = out / f"{split}_details.json"
+    with open(details_path, "w") as f:
+        json.dump(details, f, indent=2, ensure_ascii=False)
+    logger.info(f"Details saved to {details_path}")
+
+    # 3. Plain text hyp/ref files (for external scoring tools)
+    with open(out / f"{split}_hyp.txt", "w") as fh, open(
+        out / f"{split}_ref.txt", "w"
+    ) as fr:
+        for uid, hyp, ref in zip(results["utt_ids"], results["hyps"], results["refs"]):
+            fh.write(f"{uid} {hyp}\n")
+            fr.write(f"{uid} {ref}\n")

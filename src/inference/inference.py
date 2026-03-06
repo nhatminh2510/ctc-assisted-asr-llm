@@ -9,8 +9,6 @@ Three inference modes (matching the original paper):
 
 Also supports single-file transcription.
 
-Based on: https://arxiv.org/pdf/2411.06437
-Reference: https://github.com/X-LANCE/SLAM-LLM/tree/main/examples/contextual_asr
 """
 
 import os
@@ -22,90 +20,22 @@ import argparse
 import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from whisper.normalizers import BasicTextNormalizer
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-from src.model import CTCAssistedLLMASR
-from src.dataset import LibriSpeechDataset
-from src.hotword_filter import HotwordFilter, create_prompt_with_hotwords
-from src.utils import (
-    load_audio,
-    load_config,
-    load_checkpoint,
-    compute_wer,
-    setup_logging,
-    set_seed,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.models.model import CTCAssistedLLMASR
+from src.dataset.librispeech_dataset import LibriSpeechDataset
+from src.inference.hotword_filter_F1 import HotwordFilter
+from src.utils.create_prompt import create_prompt_with_hotwords
+from src.utils.dataset_utils import load_audio
+from src.utils.config_utils import load_config, setup_logging, set_seed, log_separator
+from src.utils.train_utils import load_checkpoint
+from src.utils.compute_wer import compute_wer
+from src.utils.inference_utils import load_bias_lists, load_ctc_files, save_results
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Bias list / CTC file loaders
-# ---------------------------------------------------------------------------
-def load_bias_list(bias_list_json: str) -> Dict[str, Dict]:
-    """
-    Load per-utterance bias list JSON.
-
-    Returns a dict: utt_id -> {
-        "bias_list": [...],
-        "true_hotwords": [...],
-        "transcription": "...",
-    }
-    """
-    with open(bias_list_json, "r") as f:
-        data = json.load(f)
-    result = {}
-    for entry in data:
-        uid = entry["utt_id"]
-        result[uid] = {
-            "bias_list": entry.get("bias_list", []),
-            "true_hotwords": entry.get("true_hotwords", []),
-            "transcription": entry.get("transcription", ""),
-        }
-    logger.info(f"Loaded bias list for {len(result)} utterances from {bias_list_json}")
-    return result
-
-
-def load_bias_lists(paths: List[str]) -> Dict[str, Dict]:
-    """Load and merge multiple bias list JSONs (one per split)."""
-    merged: Dict[str, Dict] = {}
-    for p in paths:
-        merged.update(load_bias_list(p))
-    logger.info(
-        f"Merged bias lists: {len(merged)} utterances from {len(paths)} file(s)"
-    )
-    return merged
-
-
-def load_ctc_file(ctc_path: str) -> Dict[str, str]:
-    """
-    Load CTC pseudo-label file (TSV: utt_id\\tctc_text).
-
-    Returns dict: utt_id -> ctc_decoded_text
-    """
-    results: Dict[str, str] = {}
-    with open(ctc_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                results[parts[0]] = parts[1]
-    logger.info(f"Loaded {len(results)} CTC decodes from {ctc_path}")
-    return results
-
-
-def load_ctc_files(paths: List[str]) -> Dict[str, str]:
-    """Load and merge multiple CTC decode files (one per split)."""
-    merged: Dict[str, str] = {}
-    for p in paths:
-        merged.update(load_ctc_file(p))
-    logger.info(f"Merged CTC files: {len(merged)} utterances from {len(paths)} file(s)")
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +254,8 @@ def evaluate_dataset(
             logger.debug(f"REF: {ref}")
 
     # Normalise
-    hyps = [normalizer(h) for h in raw_hyps]
-    refs = [normalizer(r) for r in raw_refs]
+    hyps = [normalizer(h.strip()) for h in raw_hyps]
+    refs = [normalizer(r.strip()) for r in raw_refs]
 
     wer_score = compute_wer(hyps, refs) if hyps and refs else 0.0
 
@@ -383,57 +313,6 @@ def transcribe_single(
 
 
 # ---------------------------------------------------------------------------
-# Result I/O
-# ---------------------------------------------------------------------------
-def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
-    """Persist evaluation results to *output_dir*."""
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    # 1. Summary JSON
-    summary = {
-        "split": split,
-        "wer": results["wer"],
-        "num_samples": len(results["hyps"]),
-    }
-    summary_path = out / f"{split}_summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    logger.info(f"Summary saved to {summary_path}")
-
-    # 2. Per-utterance details
-    details = []
-    for uid, hyp, ref, raw_hyp, raw_ref in zip(
-        results["utt_ids"],
-        results["hyps"],
-        results["refs"],
-        results["raw_hyps"],
-        results["raw_refs"],
-    ):
-        details.append(
-            {
-                "utt_id": uid,
-                "hyp": hyp,
-                "ref": ref,
-                "raw_hyp": raw_hyp,
-                "raw_ref": raw_ref,
-            }
-        )
-    details_path = out / f"{split}_details.json"
-    with open(details_path, "w") as f:
-        json.dump(details, f, indent=2, ensure_ascii=False)
-    logger.info(f"Details saved to {details_path}")
-
-    # 3. Plain text hyp/ref files (for external scoring tools)
-    with open(out / f"{split}_hyp.txt", "w") as fh, open(
-        out / f"{split}_ref.txt", "w"
-    ) as fr:
-        for uid, hyp, ref in zip(results["utt_ids"], results["hyps"], results["refs"]):
-            fh.write(f"{uid} {hyp}\n")
-            fr.write(f"{uid} {ref}\n")
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def parse_args():
@@ -461,6 +340,12 @@ def parse_args():
     )
 
     # --- paths ---
+    parser.add_argument(
+        "--infer-config",
+        type=str,
+        default=None,
+        help="Path to inference config YAML (default: config/inference.yaml)",
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -609,23 +494,31 @@ def main():
     # ------------------------------------------------------------------
     # Load config
     # ------------------------------------------------------------------
-    config_path = args.config or str(exp_dir / "training_config.yaml")
-    if os.path.exists(config_path):
-        config = load_config(config_path)
-        logger.info(f"Loaded config from {config_path}")
+    training_config_path = args.config or str(exp_dir / "training_config.yaml")
+    if os.path.exists(training_config_path):
+        config = load_config(training_config_path)
+        logger.info(f"Loaded config from {training_config_path}")
     else:
-        logger.warning(f"Config not found at {config_path}, using defaults.")
+        logger.warning(f"Config not found at {training_config_path}, using defaults.")
         config = {}
 
     model_cfg = config.get("model", {})
     data_cfg = config.get("data", {})
-    infer_cfg = config.get("inference", {})
-    filter_cfg = config.get("hotword_filter", {})
+
+    infer_config_path = args.infer_config
+    if infer_config_path and os.path.exists(infer_config_path):
+        infer_config = load_config(infer_config_path)
+        logger.info(f"Loaded inference config from {infer_config_path}")
+    else:
+        logger.warning(
+            f"Inference config not found at {infer_config_path}, using defaults."
+        )
+        infer_config = {}
+    infer_cfg = infer_config.get("inference", {})
+    filter_cfg = infer_config.get("hotword_filter", {})
 
     # CLI overrides
-    wavlm_id = args.wavlm_model or model_cfg.get(
-        "wavlm_model_path", "facebook/wavlm-large"
-    )
+    wavlm_id = args.wavlm_model or model_cfg.get("encoder_path", "facebook/wavlm-large")
     llm_id = args.llm_model or model_cfg.get("llm_model_path", "lmsys/vicuna-7b-v1.5")
     max_new_tokens = args.max_new_tokens or infer_cfg.get("max_new_tokens", 256)
     num_beams = args.num_beams or infer_cfg.get("num_beams", 4)
@@ -748,7 +641,7 @@ def main():
     t0 = time.time()
 
     for split in args.splits:
-        logger.info("\n")
+        log_separator()
         logger.info(f"Evaluating: split={split}, infer_type={args.infer_type}")
 
         dataset = LibriSpeechDataset(
@@ -821,7 +714,7 @@ def main():
         logger.info(f"\nOverall WER = {overall_wer*100:.2f}%")
 
     # Print summary
-    logger.info("\n")
+    log_separator()
     logger.info(f"INFERENCE RESULTS  (infer_type={args.infer_type})")
     for split, w in split_wers.items():
         logger.info(f"  {split:20s}  WER = {w*100:.2f}%")

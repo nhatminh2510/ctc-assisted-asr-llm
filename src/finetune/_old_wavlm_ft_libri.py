@@ -34,8 +34,8 @@ from transformers import (
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-from src.dataset import LibriSpeechDataset
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.dataset.librispeech_dataset import LibriSpeechDataset
 
 # ============================================================================
 # Constants
@@ -61,7 +61,7 @@ VOCAB_SAMPLING_SIZE = 10000
 FEATURE_SIZE = 1
 
 # Setup
-DEFAULT_DATA_DIR = "/home/25/minh/CTC-assisted-ASR-LLM/data/LibriSpeech"
+DEFAULT_DATA_DIR = "/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech"
 DEFAULT_OUTPUT_DIR = "exp/wavlm-ft-libri"
 DEFAULT_MODEL = "microsoft/wavlm-large"
 

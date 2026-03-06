@@ -9,7 +9,7 @@ USE_DEVICE=0
 # Singapore, Toronto is shit
 
 # Check if data exists
-data_dir="/home/25/minh/CTC-assisted-ASR-LLM/data/LibriSpeech"
+data_dir="/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech"
 if [ ! -d "$data_dir" ] && [ ! -L "$data_dir" ]; then
     echo "ERROR: Data not found at $data_dir"
     echo "Please ensure data is properly placed in the data directory."
@@ -17,15 +17,14 @@ if [ ! -d "$data_dir" ] && [ ! -L "$data_dir" ]; then
 fi
 
 # Check if config exists
-conf="/home/25/minh/CTC-assisted-ASR-LLM/configs/train_wavlm-ft-ctc_llm.yaml"
-# conf="/home/25/minh/CTC-assisted-ASR-LLM/configs/train_wavlm-ft-ctc_llm_GB10.yaml"
+conf="/home/25/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_contextual.yaml"
 if [ ! -f "$conf" ]; then
     echo "ERROR: Config file not found at $conf"
     exit 1
 fi
 
 # Create output directory if not exists
-output_dir="exp/wavlm-ft-ctc_llm_libri_bs4_new-projector_batch-hotword_new-prompt_test-ckpt"
+output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual"
 log_dir="$output_dir/logs"
 mkdir -p $output_dir/checkpoints
 mkdir -p "$log_dir"
@@ -39,18 +38,18 @@ rotate_file() {
 
     if [ -f "$target_file" ]; then
         counter=1
-        while [ -f "${base_name}_${counter}.log" ]; do
+        while [ -f "${base_name}.${counter}.log" ]; do
             ((counter++))
         done
-        mv "$target_file" "${base_name}_${counter}.log"
-        echo "Rotated: $target_file -> ${base_name}_${counter}.log"
+        mv "$target_file" "${base_name}.${counter}.log"
+        echo "Rotated: $target_file -> ${base_name}.${counter}.log"
     fi
 }
 
 rotate_file "$log_dir/training.log"
 rotate_file "$log_dir/eval.log"
 # Load checkpoint
-checkpoint="/home/25/minh/CTC-assisted-ASR-LLM/exp/wavlm-ft-ctc_llm_libri_bs4_new-projector_batch-hotword_new-prompt/checkpoints/checkpoint_step_20000.pt"
+checkpoint=
 if [ -n "$checkpoint" ]; then
     echo "Resuming training from checkpoint: $checkpoint"
 fi
@@ -61,10 +60,9 @@ CUDA_VISIBLE_DEVICES=$USE_DEVICE python src/train.py \
     --config $conf \
     --data-dir $data_dir \
     --output-dir $output_dir \
-    ${checkpoint:+--load-checkpoint $checkpoint} "$@"
+    ${checkpoint:+--load-checkpoint $checkpoint} 
 
-rm -rf pymp*
-rm -rf tmp*
+rm -rf pymp* tmp*
 echo ""
 echo "========================================"
 echo "Training completed!"

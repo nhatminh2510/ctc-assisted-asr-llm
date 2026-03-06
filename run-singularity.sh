@@ -11,7 +11,7 @@ set image = $1
 #Seoul
 # set image = /local/Containers/Ubuntu2004+GPU/espnet2-kaldi-whisper-cuda11.3.1-cudnn8-devel-ubuntu20.04-20240411.sif
 # set image = /home-local/minh/myhome/MultiModal_LLM/slp2025/slp.sif
-# set image = /home-local/minh/myhome/CTC-assisted-ASR-LLM/ctc-asr-llm.sif
+# set image = /home-local/minh/myhome/ctc-assisted-asr-llm/ctc-asr-llm.sif
 
 # set image = $1
 

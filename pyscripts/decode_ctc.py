@@ -9,9 +9,9 @@ relevant hotwords from a bias list via n-gram indexing + Levenshtein scoring.
 
 Usage:
     python scripts/decode_ctc.py \
-        --wavlm-model exp/wavlm-ft-libri_2/final \
+        --wavlm-model exp/wavlm-ft-libri/final \
         --data-dir data/LibriSpeech \
-        --output-dir exp/wavlm-ft-libri_2/ctc_decode \
+        --output-dir exp/wavlm-ft-libri/ctc_decode \
         --splits test-clean test-other
 
 """
@@ -28,9 +28,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import WavLMForCTC, Wav2Vec2Processor
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-from src.dataset import LibriSpeechDataset
-from src.utils import compute_wer, setup_logging
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.dataset.librispeech_dataset import LibriSpeechDataset
+from src.utils.compute_wer import compute_wer
+from src.utils.config_utils import setup_logging, log_separator
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     for split in args.splits:
+        log_separator()
         logger.info(f"Decoding split: {split}")
 
         results = decode_split(
@@ -242,8 +244,6 @@ def main():
         save_ctc_file(results, out_path)
 
         logger.info(f"  Decoded {len(results)} utterances -> {out_path}")
-
-    logger.info("\nDone!")
 
 
 if __name__ == "__main__":

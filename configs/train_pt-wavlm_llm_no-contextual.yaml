@@ -1,14 +1,9 @@
 model:
-  wavlm_model_path: /home/25/minh/CTC-assisted-ASR-LLM/exp/wavlm-ft-libri_2/final
+  encoder_path: facebook/wavlm-large
   llm_model_path: lmsys/vicuna-7b-v1.5
   freeze_encoder: true
   freeze_llm: true
   use_lora: false
-  projector:
-    input_dim: 1024
-    hidden_dim: 2048
-    output_dim: 4096
-    conv_kernel_size: 5
 
 training:
   batch_size: 4
@@ -31,18 +26,6 @@ training:
 
 data:
   sample_rate: 16000
-  p_keep: 0.5
-  n_phrases: 1
-  n_order_max: 4
-
-hotword_filter:
-  n_gram: 2
-  top_k: 10
-  probability-threshold: 0.9
-  word_num: 15
-
-inference:
-  max_new_tokens: 256
-  num_beams: 4
-  temperature: 1.0
-  use_hotword_filtering: true
+  p_keep: 0
+  n_phrases: 0
+  n_order_max: 0

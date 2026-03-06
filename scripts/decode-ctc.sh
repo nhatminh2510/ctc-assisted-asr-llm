@@ -19,13 +19,13 @@ USE_DEVICE=1
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-DATA_DIR="${DATA_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/data/LibriSpeech}"
-EXP_DIR="${EXP_DIR:-exp/wavlm-ft-libri_2}"
+DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech}"
+EXP_DIR="${EXP_DIR:-exp/wavlm-ft-libri}"
 WAVLM_MODEL="${WAVLM_MODEL:-${EXP_DIR}/final}"
 OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/ctc_decode}"
 SPLITS="${SPLITS:-test-clean test-other}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
-DATA_DEVICE="${DATA_DEVICE:-cuda}"
+DATA_DEVICE="${DATA_DEVICE:-cpu}"
 if [ "$DATA_DEVICE" == "cuda" ]; then
     NUM_WORKERS=0  
 else
@@ -59,7 +59,7 @@ echo "Batch size:   $BATCH_SIZE"
 echo "========================================"
 echo ""
 
-CUDA_VISIBLE_DEVICES=$USE_DEVICE python3 scripts/decode_ctc.py \
+CUDA_VISIBLE_DEVICES=$USE_DEVICE python3 pyscripts/decode_ctc.py \
     --wavlm-model "$WAVLM_MODEL" \
     --data-dir "$DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \

@@ -5,7 +5,7 @@ __pycache__
 data
 checkpoints
 exp
-models
+download_models
 results
 logs
 runs

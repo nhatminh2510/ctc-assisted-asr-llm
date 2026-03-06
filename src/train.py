@@ -1,12 +1,9 @@
 import os
 import sys
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from torch.utils.data import ConcatDataset
-from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.tensorboard import SummaryWriter
 from whisper.normalizers import BasicTextNormalizer
 from typing import Dict, Any, Optional, List
@@ -14,162 +11,27 @@ import logging
 from pathlib import Path
 from tqdm import tqdm
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-from src.model import CTCAssistedLLMASR
-from src.utils import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.models.model import CTCAssistedLLMASR
+from src.utils.config_utils import (
     load_config,
     save_config,
-    save_info,
-    save_checkpoint,
-    load_checkpoint,
-    compute_wer,
     setup_logging,
     switch_log_file,
     set_seed,
-    generate_training_hotwords,
 )
-from src.hotword_filter import create_prompt_with_hotwords
-from src.dataset import KaldiDataset, LibriSpeechDataset
+from src.utils.train_utils import (
+    save_info,
+    save_checkpoint,
+    load_checkpoint,
+    get_collate_fn,
+    get_linear_schedule,
+    tensorboard_log_dir,
+)
+from src.utils.compute_wer import compute_wer
+from src.dataset.librispeech_dataset import LibriSpeechDataset
 
 logger = logging.getLogger(__name__)
-
-
-def get_collate_fn(
-    encoder_processor,
-    decoder_processor,
-    mode: str = "train",
-    device: str = "cuda",
-    p_keep: float = 0.5,
-    n_order_max: int = 4,
-    n_phrases: int = 1,
-):
-    """Create collate function with per-batch shared hotword generation (matching reference)."""
-
-    def _generate_batch_hotwords(batch):
-        """Generate shared hotwords from all batch transcriptions (per-batch).
-
-        Each sample contributes one n-gram with probability p_keep.
-        All n-grams are collected into a single shared hotword list for the whole batch.
-        """
-        selected_ngrams_list = []
-        for sample in batch:
-            ngrams = generate_training_hotwords(
-                sample["transcription"],
-                p_keep=p_keep,
-                n_phrases=n_phrases,
-                n_order_max=n_order_max,
-            )
-            selected_ngrams_list.extend(ngrams)
-        return selected_ngrams_list
-
-    def _build_batch(batch, to_device=None):
-        # 1. Process audio
-        encoder_inputs = encoder_processor(
-            [sample["audio"] for sample in batch],
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-            padding=True,
-        )
-        if to_device:
-            encoder_inputs = encoder_inputs.to(to_device)
-
-        # 2. Generate per-batch shared hotwords (matching reference collator)
-        batch_hotwords = _generate_batch_hotwords(batch)
-
-        # 3. Create shared prompt (same for all samples in batch)
-        shared_prompt_only = create_prompt_with_hotwords(batch_hotwords)
-
-        # 4. Compute prompt_length (same for all samples since prompt is shared)
-        prompt_ids = decoder_processor.encode(shared_prompt_only)
-        prompt_length = len(prompt_ids)
-        prompt_lengths = [prompt_length] * len(batch)
-
-        # 5. Create full text: shared_prompt + individual transcription + EOS
-        full_texts = [
-            create_prompt_with_hotwords(batch_hotwords, sample["transcription"])
-            for sample in batch
-        ]
-        full_decoder_inputs = decoder_processor(
-            full_texts,
-            return_tensors="pt",
-            padding=True,
-        )
-        if to_device:
-            full_decoder_inputs = full_decoder_inputs.to(to_device)
-
-        if mode == "train":
-            return {
-                "input_values": encoder_inputs.input_values,
-                "input_ids": full_decoder_inputs.input_ids,
-                "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": full_decoder_inputs.attention_mask,
-                "prompt_lengths": prompt_lengths,
-            }
-        elif mode == "eval":
-            # Prompt-only for generation (same prompt for all samples)
-            prompt_only_inputs = decoder_processor(
-                [shared_prompt_only] * len(batch),
-                return_tensors="pt",
-                padding=True,
-            )
-            if to_device:
-                prompt_only_inputs = prompt_only_inputs.to(to_device)
-
-            return {
-                "input_values": encoder_inputs.input_values,
-                # Full prompt+transcription for loss computation
-                "input_ids": full_decoder_inputs.input_ids,
-                "encoder_attention_mask": encoder_inputs.attention_mask,
-                "decoder_attention_mask": full_decoder_inputs.attention_mask,
-                # Prompt-only for generation
-                "generate_input_ids": prompt_only_inputs.input_ids,
-                "generate_attention_mask": prompt_only_inputs.attention_mask,
-                "prompt_lengths": prompt_lengths,
-                "transcription": [sample["transcription"] for sample in batch],
-            }
-        else:
-            raise ValueError(
-                f"Invalid collate mode: {mode}. Expected 'train' or 'eval'."
-            )
-
-    def collate_fn_cpu(batch):
-        return _build_batch(batch, to_device=None)
-
-    def collate_fn_gpu(batch):
-        return _build_batch(batch, to_device="cuda")
-
-    if device == "cuda":
-        return collate_fn_gpu
-    else:
-        return collate_fn_cpu
-
-
-def get_linear_schedule(
-    optimizer, num_warmup_steps: int, num_training_steps: int
-) -> LambdaLR:
-    def lr_lambda(current_step: int) -> float:
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        return max(
-            0.0,
-            float(num_training_steps - current_step)
-            / float(max(1, num_training_steps - num_warmup_steps)),
-        )
-
-    return LambdaLR(optimizer, lr_lambda)
-
-
-def tensorboard_log_dir(output_dir: str) -> str:
-    from datetime import datetime
-    import socket
-    import os
-
-    timestamp = datetime.now().strftime("%b%d_%H-%M-%S")
-    hostname = socket.gethostname()
-
-    log_dir = os.path.join(output_dir, "runs", f"{timestamp}_{hostname}")
-    return log_dir
 
 
 class Trainer:
@@ -308,7 +170,7 @@ class Trainer:
             logger.error(f"Checkpoint not found: {checkpoint_path}")
             return
         try:
-            _, step, loss = load_checkpoint(
+            _, step, loss, _ = load_checkpoint(
                 self.model,
                 checkpoint_path,
                 optimizer=self.optimizer,
@@ -547,6 +409,7 @@ class Trainer:
                                     0,
                                     self.global_step,
                                     val_loss,
+                                    self.best_wer,
                                     str(best_wer_path),
                                 )
                                 logger.info(
@@ -671,7 +534,7 @@ def main():
     # Model
     model_config = full_config["model"]
     model = CTCAssistedLLMASR(
-        encoder_id=model_config["wavlm_model_path"],
+        encoder_id=model_config["encoder_path"],
         decoder_id=model_config["llm_model_path"],
         freeze_encoder=model_config["freeze_encoder"],
         freeze_llm=model_config["freeze_llm"],

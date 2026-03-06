@@ -22,23 +22,24 @@ USE_DEVICE=0
 # ---------------------------------------------------------------------------
 # Shared configuration
 # ---------------------------------------------------------------------------
-DATA_DIR="${DATA_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/data/LibriSpeech}"
-EXP_DIR="${EXP_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/exp/wavlm-ft-ctc_llm_libri_bs4_new-projector_batch-hotword_new-prompt_test-ckpt}"
+DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech}"
+EXP_DIR="${EXP_DIR:-/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual}"
 CHECKPOINT="${CHECKPOINT:-${EXP_DIR}/checkpoints/best_wer_model.pt}"
 CONFIG="${CONFIG:-${EXP_DIR}/training_config.yaml}"
+INFER_CONFIG="${INFER_CONFIG:-config/inference.yaml}"
 SPLITS="${SPLITS:-test-clean test-other}"
 
-BATCH_SIZE="${BATCH_SIZE:-4}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
 NUM_BEAMS="${NUM_BEAMS:-4}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
 DATA_DEVICE="${DATA_DEVICE:-cuda}"
 
 # Bias list / CTC directories
-HOTWORDS_DIR="${HOTWORDS_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/data/processed/LibriSpeech/hotwords}"
-CTC_DIR="${CTC_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/exp/wavlm-ft-libri_2/ctc_decode}"
+HOTWORDS_DIR="${HOTWORDS_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon/LibriSpeech/hotwords}"
+CTC_DIR="${CTC_DIR:-/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-libri_2/ctc_decode}"
 
 # Filter parameters
-COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-/home/25/minh/CTC-assisted-ASR-LLM/data/processed/LibriSpeech/common_words_5k.txt}"
+COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon/LibriSpeech/common_words_5k.txt}"
 PROBABILITY_THRESHOLD="${PROBABILITY_THRESHOLD:-0.9}"
 WORD_NUM="${WORD_NUM:-15}"
 
@@ -91,11 +92,12 @@ run_infer() {
     echo "  Output:  ${output_dir}"
     echo "========================================"
 
-    local cmd="CUDA_VISIBLE_DEVICES=$USE_DEVICE python3 src/inference.py \
+    local cmd="CUDA_VISIBLE_DEVICES=$USE_DEVICE python3 src/inference/inference.py \
         --mode eval \
         --infer-type $infer_type \
         --checkpoint $CHECKPOINT \
         --config $CONFIG \
+        --infer-config $INFER_CONFIG \
         --output-dir $output_dir \
         --data-dir $DATA_DIR \
         --splits $SPLITS \
@@ -125,7 +127,7 @@ run_infer() {
 # ---------------------------------------------------------------------------
 # 1. nobias
 # ---------------------------------------------------------------------------
-run_infer nobias
+# run_infer nobias
 
 # ---------------------------------------------------------------------------
 # 2. gt  (requires bias lists)

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# image=/home/25/minh/CTC-assisted-ASR-LLM/containers/ctc-asr-llm.sif
+# image=/home/25/minh/ctc-assisted-asr-llm/containers/ctc-asr-llm.sif
 event=$1
 image=/home-local/minh/myhome/MLC-SLM-Baseline/MLC-SLM.sif
 

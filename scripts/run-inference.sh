@@ -34,25 +34,27 @@ USE_DEVICE=0
 # ---------------------------------------------------------------------------
 # Configuration (override with environment variables)
 # ---------------------------------------------------------------------------
-DATA_DIR="${DATA_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/data/LibriSpeech}"
+ROOT_DIR=/home/25/minh/ctc-assisted-asr-llm
+DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data/LibriSpeech}"
 
 # Experiment directory containing checkpoints/ and training_config.yaml
-EXP_DIR="${EXP_DIR:-/home/25/minh/CTC-assisted-ASR-LLM/exp/wavlm-ft-ctc_llm_libri_bs4_new-projector_batch-hotword_new-prompt_test-ckpt}"
+EXP_DIR="${EXP_DIR:-${ROOT_DIR}/exp/wavlm-ft-ctc_llm_libri_contextual}"
 
 # Checkpoint – defaults to best_wer_model.pt in the experiment
 CHECKPOINT="${CHECKPOINT:-${EXP_DIR}/checkpoints/best_wer_model.pt}"
 
 # Config file – defaults to training_config.yaml in the experiment
 CONFIG="${CONFIG:-${EXP_DIR}/training_config.yaml}"
+INFER_CONFIG="${INFER_CONFIG:-${ROOT_DIR}/configs/inference.yaml}"
 
 # Mode: "eval" (dataset evaluation) or "transcribe" (single file)
 MODE="${MODE:-eval}"
 
 # Inference type: "nobias", "gt", or "filter"
-INFER_TYPE="${INFER_TYPE:-gt}"
+INFER_TYPE="${INFER_TYPE:-nobias}"
 
 # Output directory for results (auto: <exp-dir>/inference/<infer_type>/)
-OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/inference/${INFER_TYPE}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/inference/${INFER_TYPE}_1}"
 
 # Dataset splits to evaluate (space-separated)
 SPLITS="${SPLITS:-test-clean test-other}"
@@ -77,7 +79,7 @@ BIAS_LIST_JSON="${BIAS_LIST_JSON:-}"
 CTC_FILE="${CTC_FILE:-}"
 
 # --- Filter parameters ---
-COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-/home/25/minh/CTC-assisted-ASR-LLM/data/processed/LibriSpeech/common_words_5k.txt}"
+COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon/LibriSpeech/common_words_5k.txt}"
 PROBABILITY_THRESHOLD="${PROBABILITY_THRESHOLD:-0.9}"
 WORD_NUM="${WORD_NUM:-15}"
 
@@ -140,11 +142,12 @@ fi
 # ---------------------------------------------------------------------------
 mkdir -p "$OUTPUT_DIR"
 
-CMD="CUDA_VISIBLE_DEVICES=$USE_DEVICE python3 src/inference.py \
+CMD="CUDA_VISIBLE_DEVICES=$USE_DEVICE python3 src/inference/inference.py \
     --mode $MODE \
     --infer-type $INFER_TYPE \
     --checkpoint $CHECKPOINT \
     --config $CONFIG \
+    --infer-config $INFER_CONFIG \
     --output-dir $OUTPUT_DIR \
     --batch-size $BATCH_SIZE \
     --num-beams $NUM_BEAMS \

@@ -75,7 +75,7 @@ dataloader:
 
 # -- Output --
 output:
-  output_dir: exp/wavlm-ft-ctc
+  output_dir: exp/wavlm-ft-ctc_libri_new
   report_to: [tensorboard]
 
 # -- Reproducibility --

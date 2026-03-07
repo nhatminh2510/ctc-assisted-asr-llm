@@ -37,9 +37,13 @@ find_available_port() {
     exit 1
 }
 
-port=$(find_available_port 12599)
+port=$(find_available_port 6006)
 echo "Using port $port for TensorBoard"
 
-cmd="tensorboard --logdir $event --port $port"
+cmd="tensorboard \
+--logdir $event \
+--port $port \
+--bind_all \
+--reload_interval 5"
 singularity exec --nv --bind /home,/home-local,/CDshare,/kailab,/App,/LabWork,/UserTmp,/local,/Mirror --no-home $image $cmd
 

@@ -1,0 +1,31 @@
+model:
+  encoder_path: microsoft/wavlm-large
+  llm_model_path: lmsys/vicuna-7b-v1.5
+  freeze_encoder: true
+  freeze_llm: true
+  use_lora: false
+
+training:
+  batch_size: 4
+  grad_accumulation : 1
+  learning_rate: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.0
+  warmup_steps: 1000
+  max_steps: 100000
+  num_epochs: 0
+  gradient_clip: 1.0
+  clip_grad_norm: 1.0
+  eval_every: 5000 
+  save_every: 20000
+  save_total_limit: 2
+  log_every: 100
+  num_workers: 4
+  pin_memory: False
+
+data:
+  sample_rate: 16000
+  p_keep: 0
+  n_phrases: 0
+  n_order_max: 0

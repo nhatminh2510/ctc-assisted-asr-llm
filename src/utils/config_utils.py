@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from typing import Dict, Any, Optional
@@ -30,7 +31,8 @@ def setup_logging(log_file: Optional[str] = None, level: int = logging.INFO) -> 
         level: Mức độ logging
     """
     handlers = [logging.StreamHandler()]
-
+    log_dir = os.path.dirname(log_file) if log_file else None
+    os.makedirs(log_dir, exist_ok=True)
     if log_file:
         handlers.append(logging.FileHandler(log_file))
 

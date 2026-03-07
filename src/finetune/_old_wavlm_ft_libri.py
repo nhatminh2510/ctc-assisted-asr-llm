@@ -62,7 +62,7 @@ FEATURE_SIZE = 1
 
 # Setup
 DEFAULT_DATA_DIR = "/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech"
-DEFAULT_OUTPUT_DIR = "exp/wavlm-ft-libri"
+DEFAULT_OUTPUT_DIR = "exp/wavlm-ft-ctc-libri"
 DEFAULT_MODEL = "microsoft/wavlm-large"
 
 # Logger

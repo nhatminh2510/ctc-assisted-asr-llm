@@ -5,6 +5,7 @@ from transformers import (
     WavLMForCTC,
     AutoTokenizer,
     AutoProcessor,
+    AutoFeatureExtractor,
     AutoModelForCausalLM,
 )
 
@@ -18,6 +19,26 @@ from typing import Optional, Tuple, List
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def load_encoder_processor(encoder_id: str):
+    """Load an audio processor for the encoder.
+
+    Finetuned WavLM-CTC directories include a tokenizer-backed processor,
+    while base WavLM checkpoints usually only provide a feature extractor.
+    The rest of the code only needs audio preprocessing, so falling back to a
+    feature extractor is sufficient.
+    """
+    try:
+        return AutoProcessor.from_pretrained(encoder_id)
+    except Exception as exc:
+        logger.warning(
+            "Falling back to AutoFeatureExtractor for %s because AutoProcessor "
+            "could not be loaded: %s",
+            encoder_id,
+            exc,
+        )
+        return AutoFeatureExtractor.from_pretrained(encoder_id)
 
 
 class CTCAssistedLLMASR(nn.Module):
@@ -38,7 +59,7 @@ class CTCAssistedLLMASR(nn.Module):
         try:
             logger.info(f"Loading WavLM encoder: {encoder_id}")
             self.encoder = WavLMForCTC.from_pretrained(encoder_id)
-            self.encoder_processor = AutoProcessor.from_pretrained(encoder_id)
+            self.encoder_processor = load_encoder_processor(encoder_id)
             self.encoder_hidden_size = self.encoder.config.hidden_size
         except Exception as e:
             logger.error(f"Error loading WavLM: {e}")

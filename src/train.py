@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.models.model import CTCAssistedLLMASR
+from src.utils.dataset_utils import to_cuda
 from src.utils.config_utils import (
     load_config,
     save_config,
@@ -212,13 +213,6 @@ class Trainer:
             logger.info(f"Removing old checkpoint: {oldest_ckpt}")
             oldest_ckpt.unlink()
 
-    def to_cuda(self, batch: Dict[str, Any]) -> Dict[str, Any]:
-        """Đẩy tất cả Tensor trong batch lên device, giữ nguyên các kiểu dữ liệu khác."""
-        return {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
-
     @torch.no_grad()
     def evaluate(
         self,
@@ -239,7 +233,7 @@ class Trainer:
         refs = []
         for batch in tqdm(self.val_loader, desc="Evaluating"):
             if self.data_loading_device == "cpu":
-                batch = self.to_cuda(batch)
+                batch = to_cuda(batch)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 loss = self.model(**batch)
             total_loss += loss.item()
@@ -313,7 +307,7 @@ class Trainer:
                 self.model.llm.eval()
                 for batch_idx, batch in enumerate(self.train_loader):
                     if self.data_loading_device == "cpu":
-                        batch = self.to_cuda(batch)
+                        batch = to_cuda(batch)
                     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                         loss = self.model(**batch)
                         loss = loss / self.grad_accumulation

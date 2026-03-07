@@ -1,6 +1,7 @@
 import torch
 import torchaudio
 import logging
+from typing import Any, Dict
 
 
 logger = logging.getLogger(__name__)
@@ -37,3 +38,10 @@ def load_audio(audio_path: str, target_sr: int = 16000) -> torch.Tensor:
     except Exception as e:
         logger.error(f"Error loading audio {audio_path}: {e}")
         raise
+
+
+def to_cuda(batch: Dict[str, Any]) -> Dict[str, Any]:
+    """Đẩy tất cả Tensor trong batch lên device, giữ nguyên các kiểu dữ liệu khác."""
+    return {
+        k: v.to("cuda") if isinstance(v, torch.Tensor) else v for k, v in batch.items()
+    }

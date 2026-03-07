@@ -16,15 +16,26 @@ if [ ! -d "$data_dir" ] && [ ! -L "$data_dir" ]; then
     exit 1
 fi
 
+# pt-wavlm_llm_no-contextual
+conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual.yaml"
+# conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual_GB10.yaml"
+output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/pt-wavlm_llm_libri_no-contextual"
+
+# wavlm-ft-ctc_llm_no-contextual
+# conf="/home/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_no-contextual.yaml"
+# output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_no-contextual"
+
+# wavlm-ft-ctc_llm_contextual
+# conf="/home/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_contextual.yaml"
+# output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual"
+
 # Check if config exists
-conf="/home/25/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_contextual.yaml"
 if [ ! -f "$conf" ]; then
     echo "ERROR: Config file not found at $conf"
     exit 1
 fi
 
 # Create output directory if not exists
-output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual"
 log_dir="$output_dir/logs"
 mkdir -p $output_dir/checkpoints
 mkdir -p "$log_dir"

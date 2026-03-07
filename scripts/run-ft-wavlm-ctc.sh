@@ -6,8 +6,8 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 USE_DEVICE=0
 CONFIG=configs/tuning/wavlm-ctc.yaml
-CHECKPOINT=/home/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc/checkpoint-10000
-OUTPUT_DIR=/home/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc
+CHECKPOINT=/home/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_libri_new/checkpoint-10000
+OUTPUT_DIR=/home/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_libri_new
 
 # ---- Optional CLI overrides (uncomment / edit as needed) ----
 OVERRIDES=(

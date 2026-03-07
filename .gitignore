@@ -17,5 +17,6 @@ tmp*
 *.def
 *.sif
 *.txt
+workspace_*.sh
 !requirements.txt
 test.*

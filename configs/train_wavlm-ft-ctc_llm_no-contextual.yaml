@@ -1,5 +1,5 @@
 model:
-  encoder_path: /home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-libri_2/final
+  encoder_path: /home/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_libri/final
   llm_model_path: lmsys/vicuna-7b-v1.5
   freeze_encoder: true
   freeze_llm: true

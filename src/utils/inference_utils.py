@@ -76,6 +76,14 @@ def load_ctc_files(paths: List[str]) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 # Result I/O
 # ---------------------------------------------------------------------------
+def save_ctc_file(results: Dict[str, str], output_path: str) -> None:
+    """Save CTC decode results as TSV: utt_id\\tctc_text"""
+    with open(output_path, "w", encoding="utf-8") as f:
+        for uid, text in sorted(results.items()):
+            f.write(f"{uid}\t{text}\n")
+    logger.info(f"Saved {len(results)} CTC decodes to {output_path}")
+
+
 def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
     """Persist evaluation results to *output_dir*."""
     out = Path(output_dir)

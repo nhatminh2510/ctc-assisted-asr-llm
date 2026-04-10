@@ -321,11 +321,11 @@ class Trainer:
                         self.optimizer.zero_grad()
                         self.scheduler.step()
                         self.global_step += 1
+                        actual_loss = loss.item() * self.grad_accumulation
 
                         # Logging
                         if self.global_step % self.log_every_steps == 0 and self.writer:
                             lr = self.optimizer.param_groups[0]["lr"]
-                            actual_loss = loss.item() * self.grad_accumulation
                             progress_bar.set_postfix(
                                 loss=f"{actual_loss:.4f}",
                                 lr=f"{lr:.2e}",
@@ -349,23 +349,6 @@ class Trainer:
                             )
 
                         progress_bar.update(1)
-
-                        # Save checkpoint
-                        if self.global_step % self.save_every_steps == 0:
-                            ckpt_path = (
-                                self.checkpoint_dir
-                                / f"checkpoint_step_{self.global_step}.pt"
-                            )
-                            save_checkpoint(
-                                self.model,
-                                self.optimizer,
-                                0,
-                                self.global_step,
-                                loss.item(),
-                                str(ckpt_path),
-                            )
-                            logger.info(f"Saved checkpoint at step {self.global_step}")
-                            self._cleanup_checkpoints()
 
                         # Evaluate
                         if (
@@ -409,6 +392,26 @@ class Trainer:
                                 logger.info(
                                     f"New best WER model at step {self.global_step}: WER={wer:.4f}"
                                 )
+
+                        # Save checkpoint
+                        if self.global_step % self.save_every_steps == 0:
+                            if actual_loss < self.best_loss:
+                                self.best_loss = actual_loss
+                            ckpt_path = (
+                                self.checkpoint_dir
+                                / f"checkpoint_step_{self.global_step}.pt"
+                            )
+                            save_checkpoint(
+                                self.model,
+                                self.optimizer,
+                                0,
+                                self.global_step,
+                                actual_loss,
+                                self.best_wer,
+                                str(ckpt_path),
+                            )
+                            logger.info(f"Saved checkpoint at step {self.global_step}")
+                            self._cleanup_checkpoints()
                         self.model.train()
                         self.model.encoder.eval()
                         self.model.llm.eval()

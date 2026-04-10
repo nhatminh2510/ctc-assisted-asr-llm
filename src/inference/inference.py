@@ -19,7 +19,7 @@ import torch
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import TYPE_CHECKING, List, Optional, Dict, Any
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from whisper.normalizers import BasicTextNormalizer
@@ -27,7 +27,6 @@ from whisper.normalizers import BasicTextNormalizer
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.models.model import CTCAssistedLLMASR
 from src.dataset.librispeech_dataset import LibriSpeechDataset
-from src.inference.hotword_filter_F1 import HotwordFilter
 from src.utils.create_prompt import create_prompt_with_hotwords
 from src.utils.dataset_utils import load_audio
 from src.utils.config_utils import load_config, setup_logging, set_seed, log_separator
@@ -35,7 +34,30 @@ from src.utils.train_utils import load_checkpoint
 from src.utils.compute_wer import compute_wer
 from src.utils.inference_utils import load_bias_lists, load_ctc_files, save_results
 
+if TYPE_CHECKING:
+    from src.inference.hotword_filter_F1 import HotwordFilter
+
 logger = logging.getLogger(__name__)
+
+# Filter method defaults (from paper Table 4)
+FILTER_DEFAULTS = {
+    "F1": {"probability_threshold": 0.95, "word_num": 5},
+    "F2": {"probability_threshold": 0.9, "word_num": 15},
+    "F3": {"probability_threshold": 0.9, "word_num": 15},
+}
+
+
+def load_hotword_filter(method: str):
+    """Dynamically import the HotwordFilter class for the given method."""
+    if method == "F1":
+        from src.inference.hotword_filter_F1 import HotwordFilter
+    elif method == "F2":
+        from src.inference.hotword_filter_F2 import HotwordFilter
+    elif method == "F3":
+        from src.inference.hotword_filter_F3 import HotwordFilter
+    else:
+        raise ValueError(f"Unknown filter method: {method}. Choose from F1, F2, F3.")
+    return HotwordFilter
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +158,7 @@ def get_filter_collate_fn(
     decoder_processor,
     bias_data: Dict[str, Dict],
     ctc_data: Dict[str, str],
-    hotword_filter: HotwordFilter,
+    hotword_filter: "HotwordFilter",
     device: str = "cuda",
 ):
     """
@@ -437,6 +459,18 @@ def parse_args():
 
     # --- hotword filter params (for filter mode) ---
     parser.add_argument(
+        "--filter-method",
+        type=str,
+        choices=["F1", "F2", "F3"],
+        default="F3",
+        help=(
+            "Hotword filtering method (for filter mode):\n"
+            "  F1 – no common word removal, threshold=0.95, max=5\n"
+            "  F2 – common word removal, whole-sentence scoring, threshold=0.9\n"
+            "  F3 – common word removal, per-word best-match, no threshold (default)"
+        ),
+    )
+    parser.add_argument(
         "--common-words-path",
         type=str,
         default=None,
@@ -446,13 +480,13 @@ def parse_args():
         "--probability-threshold",
         type=float,
         default=None,
-        help="Levenshtein.ratio threshold for filter mode (default: 0.9)",
+        help="Levenshtein.ratio threshold for filter mode (default depends on method)",
     )
     parser.add_argument(
         "--word-num",
         type=int,
         default=None,
-        help="Max hotwords to keep after filtering (default: 15)",
+        help="Max hotwords to keep after filtering (default depends on method)",
     )
 
     # --- hotwords for transcribe mode ---
@@ -553,32 +587,37 @@ def main():
     # ------------------------------------------------------------------
     # Build HotwordFilter (for filter mode)
     # ------------------------------------------------------------------
-    hotword_filter: Optional[HotwordFilter] = None
+    hotword_filter = None
     if args.infer_type == "filter":
+        filter_method = args.filter_method
+        method_defaults = FILTER_DEFAULTS[filter_method]
+
         common_words_path = args.common_words_path or filter_cfg.get(
             "common_words_path", "data/common_words_5k.txt"
         )
         prob_threshold = (
             args.probability_threshold
             if args.probability_threshold is not None
-            else filter_cfg.get("probability_threshold", 0.9)
+            else filter_cfg.get(
+                "probability_threshold", method_defaults["probability_threshold"]
+            )
         )
         word_num = (
             args.word_num
             if args.word_num is not None
-            else filter_cfg.get("word_num", 15)
+            else filter_cfg.get("word_num", method_defaults["word_num"])
         )
         n_gram = filter_cfg.get("n_gram", 2)
 
+        HotwordFilter = load_hotword_filter(filter_method)
         hotword_filter = HotwordFilter(
             common_words_path=common_words_path,
             n_gram=n_gram,
             word_num=word_num,
             probability_threshold=prob_threshold,
-            per_word_scoring=True,
         )
         logger.info(
-            f"HotwordFilter: n_gram={n_gram}, word_num={word_num}, "
+            f"HotwordFilter [{filter_method}]: n_gram={n_gram}, word_num={word_num}, "
             f"threshold={prob_threshold}, common_words={common_words_path}"
         )
 

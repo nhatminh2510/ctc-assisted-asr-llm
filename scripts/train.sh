@@ -17,17 +17,17 @@ if [ ! -d "$data_dir" ] && [ ! -L "$data_dir" ]; then
 fi
 
 # pt-wavlm_llm_no-contextual
-conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual.yaml"
 # conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual_GB10.yaml"
-output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/pt-wavlm_llm_libri_no-contextual"
+# conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual.yaml"
+# output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/pt-wavlm_llm_libri_no-contextual"
 
 # wavlm-ft-ctc_llm_no-contextual
 # conf="/home/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_no-contextual.yaml"
 # output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_no-contextual"
 
 # wavlm-ft-ctc_llm_contextual
-# conf="/home/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_contextual.yaml"
-# output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual"
+conf="/home/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_contextual.yaml"
+output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual"
 
 # Check if config exists
 if [ ! -f "$conf" ]; then
@@ -73,7 +73,11 @@ CUDA_VISIBLE_DEVICES=$USE_DEVICE python src/train.py \
     --output-dir $output_dir \
     ${checkpoint:+--load-checkpoint $checkpoint} 
 
-rm -rf pymp* tmp*
+if hostname | grep -q "singapore"; then
+    echo "Running on Singapore server, starting cleanup..."
+    rm -rf pymp* tmp*
+    echo "Cleanup completed."
+fi
 echo ""
 echo "========================================"
 echo "Training completed!"

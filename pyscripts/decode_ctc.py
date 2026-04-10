@@ -39,6 +39,7 @@ from src.dataset.librispeech_dataset import LibriSpeechDataset
 from src.utils.dataset_utils import to_cuda
 from src.utils.compute_wer import compute_wer
 from src.utils.config_utils import setup_logging, log_separator
+from src.utils.inference_utils import save_ctc_file
 
 logger = logging.getLogger(__name__)
 
@@ -213,31 +214,6 @@ def decode_split(
     wer = compute_wer(hyps, refs)
     logger.info(f"CTC decode WER for {split}: {wer}")
     return results, wer, len(dataset)
-
-
-# ---------------------------------------------------------------------------
-# I/O
-# ---------------------------------------------------------------------------
-def save_ctc_file(results: Dict[str, str], output_path: str) -> None:
-    """Save CTC decode results as TSV: utt_id\\tctc_text"""
-    with open(output_path, "w", encoding="utf-8") as f:
-        for uid, text in sorted(results.items()):
-            f.write(f"{uid}\t{text}\n")
-    logger.info(f"Saved {len(results)} CTC decodes to {output_path}")
-
-
-def load_ctc_file(ctc_path: str) -> Dict[str, str]:
-    """Load CTC decode results from TSV file."""
-    results: Dict[str, str] = {}
-    with open(ctc_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                results[parts[0]] = parts[1]
-    return results
 
 
 # ---------------------------------------------------------------------------

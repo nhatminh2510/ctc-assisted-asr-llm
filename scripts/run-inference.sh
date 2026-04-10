@@ -38,7 +38,7 @@ ROOT_DIR=/home/25/minh/ctc-assisted-asr-llm
 DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data/LibriSpeech}"
 
 # Experiment directory containing checkpoints/ and training_config.yaml
-EXP_DIR="${EXP_DIR:-${ROOT_DIR}/exp/wavlm-ft-ctc_llm_libri_contextual}"
+EXP_DIR="${EXP_DIR:-${ROOT_DIR}/exp/wavlm-ft-ctc_llm_libri_no-contextual}"
 
 # Checkpoint – defaults to best_wer_model.pt in the experiment
 CHECKPOINT="${CHECKPOINT:-${EXP_DIR}/checkpoints/best_wer_model.pt}"
@@ -54,7 +54,7 @@ MODE="${MODE:-eval}"
 INFER_TYPE="${INFER_TYPE:-nobias}"
 
 # Output directory for results (auto: <exp-dir>/inference/<infer_type>/)
-OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/inference/${INFER_TYPE}_1}"
+OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/inference/${INFER_TYPE}}"
 
 # Dataset splits to evaluate (space-separated)
 SPLITS="${SPLITS:-test-clean test-other}"

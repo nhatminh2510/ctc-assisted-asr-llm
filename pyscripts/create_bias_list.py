@@ -128,7 +128,9 @@ def compute_word_frequencies(data_dir: str, output_path: str) -> str:
 
     # Save word frequencies to output path
     with open(output_path, "w", encoding="utf-8") as f:
-        for word, count in sorted(word_counter.items(), key=lambda x: x[1], reverse=True):
+        for word, count in sorted(
+            word_counter.items(), key=lambda x: x[1], reverse=True
+        ):
             f.write(f"{word}\t{count}\n")
     print(f"Saved word frequencies for {len(word_counter)} words to {output_path}")
     return output_path

@@ -25,13 +25,13 @@ DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech}"
 EXP_DIR="${EXP_DIR:-exp/wavlm-ft-ctc_libri_new}"
 
 # WAVLM_MODEL="${WAVLM_MODEL:-${EXP_DIR}/final}"
-WAVLM_MODEL="${WAVLM_MODEL:-/home/minh/ctc-assisted-asr-llm/download_models/wavlm_large_ft_libri960_char.pt}"
+WAVLM_MODEL="${WAVLM_MODEL:-imprt/kushinada-hubert-large-laborotv2-asr}"
 
 # OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/ctc_decode}"
-OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/ctc_decode_paper}"
+OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/jp_ctc_decode}"
 
-VOCAB_PATH="${VOCAB_PATH:-${EXP_DIR}/vocab.json}"
-BASE_MODEL="${BASE_MODEL:-microsoft/wavlm-large}"
+# VOCAB_PATH="${VOCAB_PATH:-${EXP_DIR}/vocab.json}"
+# BASE_MODEL="${BASE_MODEL:-microsoft/wavlm-large}"
 SPLITS="${SPLITS:-test-clean test-other dev-clean dev-other}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 DATA_DEVICE="${DATA_DEVICE:-cpu}"

@@ -31,9 +31,47 @@ import random
 import argparse
 from pathlib import Path
 from collections import Counter
-from typing import Dict, List, Set, Tuple
+from typing import Callable, Dict, List, Set, Tuple
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+
+# ---------------------------------------------------------------------------
+# Word tokenisation (language-aware)
+# ---------------------------------------------------------------------------
+def get_word_tokenizer(language: str = "en") -> Callable[[str], List[str]]:
+    """Return a ``text -> [words]`` function.
+
+    English splits on whitespace. Japanese has no spaces, so it is segmented
+    with a morphological analyzer (see :mod:`src.utils.japanese`); frequent
+    function words (particles, …) naturally end up in the common-words set and
+    are excluded from the rare/hotword lists.
+    """
+    if language == "ja":
+        from src.utils.japanese import JapaneseTokenizer
+
+        tokenizer = JapaneseTokenizer()
+        if tokenizer.backend_name == "char":
+            # Unlike the hotword filter (which matches readings with a sliding
+            # window and tolerates the fallback), extracting *words* genuinely
+            # requires a segmenter. Without one every token is a single
+            # character and the rare-word lists come out empty.
+            print(
+                "ERROR: --language ja needs a morphological analyzer, but none is "
+                "installed (falling back to character split, which cannot produce "
+                "words).\n"
+                "       Install one of:  pip install fugashi unidic-lite\n"
+                "                        pip install sudachipy sudachidict-core\n"
+                "                        pip install pykakasi",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        def _ja_tokenize(text: str) -> List[str]:
+            return [t.surface for t in tokenizer.segment(text) if t.surface.strip()]
+
+        return _ja_tokenize
+    return str.split
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +141,12 @@ def load_word_frequencies(freq_path: str) -> Counter:
                 word_counter[word] = int(count)
     return word_counter
 
-def compute_word_frequencies(data_dir: str, output_path: str) -> str:
+def compute_word_frequencies(
+    data_dir: str,
+    output_path: str,
+    tokenize: Callable[[str], List[str]] = str.split,
+    splits: List[str] = ("train-clean-100", "train-clean-360", "train-other-500"),
+) -> str:
     """
     Compute word frequencies from all LibriSpeech transcriptions and save to a TSV file.
 
@@ -119,11 +162,11 @@ def compute_word_frequencies(data_dir: str, output_path: str) -> str:
     word_counter: Counter = Counter()
 
     # Process all splits (train + test) to get comprehensive frequencies
-    for split in ["train-clean-100", "train-clean-360", "train-other-500"]:
+    for split in splits:
         print(f"Processing split for word frequencies: {split}")
         transcripts = load_librispeech_transcripts(data_dir, split)
         for text in transcripts.values():
-            words = text.split()
+            words = tokenize(text)
             word_counter.update(w.lower() for w in words)
 
     # Save word frequencies to output path
@@ -161,6 +204,7 @@ def build_rare_word_set(
 def find_rare_words(
     transcripts: Dict[str, str],
     rare_word_set: Set[str],
+    tokenize: Callable[[str], List[str]] = str.split,
 ) -> Set[str]:
     """
     Find rare words that actually appear in test transcriptions.
@@ -168,13 +212,14 @@ def find_rare_words(
     Args:
         transcripts: dict mapping utt_id -> transcription (UPPER CASE)
         rare_word_set: Global set of rare words (UPPER CASE)
+        tokenize: word tokeniser (whitespace for English, segmentation for JA)
 
     Returns:
         Subset of rare_word_set that appears in at least one transcription
     """
     all_test_words: Set[str] = set()
     for text in transcripts.values():
-        all_test_words.update(text.split())
+        all_test_words.update(tokenize(text))
 
     return all_test_words & rare_word_set
 
@@ -187,6 +232,7 @@ def create_per_utterance_bias_lists(
     rare_words: Set[str],
     num_distractors: int = 100,
     seed: int = 42,
+    tokenize: Callable[[str], List[str]] = str.split,
 ) -> List[Dict]:
     """
     For each utterance build a bias list:
@@ -201,7 +247,7 @@ def create_per_utterance_bias_lists(
 
     results = []
     for utt_id, text in sorted(transcripts.items()):
-        words_in_utt = set(text.split())
+        words_in_utt = set(tokenize(text))
 
         true_hotwords = sorted(words_in_utt & rare_words)
 
@@ -365,11 +411,21 @@ def parse_args():
         default=5000,
         help="Number of most frequent words to save (default: 5000)",
     )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="en",
+        choices=["en", "ja"],
+        help="Transcript language: 'en' (whitespace) or 'ja' (segmentation)",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    tokenize = get_word_tokenizer(args.language)
+    print(f"Language: {args.language}")
 
     # Step 1: Load word frequencies
     print(f"Loading word frequencies from: {args.word_freq_path}")
@@ -399,7 +455,7 @@ def main():
         transcripts = load_librispeech_transcripts(args.data_dir, split)
         print(f"  Utterances: {len(transcripts):,}")
 
-        rare_words = find_rare_words(transcripts, rare_word_set)
+        rare_words = find_rare_words(transcripts, rare_word_set, tokenize=tokenize)
         print(f"  Rare words in {split}: {len(rare_words):,}")
 
         results = create_per_utterance_bias_lists(
@@ -407,6 +463,7 @@ def main():
             rare_words,
             num_distractors=args.num_distractors,
             seed=args.seed,
+            tokenize=tokenize,
         )
 
         utts_with_hw = sum(1 for r in results if r["num_true_hotwords"] > 0)

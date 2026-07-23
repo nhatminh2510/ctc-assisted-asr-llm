@@ -29,6 +29,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
     WavLMForCTC,
+    AutoModelForCTC,
+    AutoProcessor,
     Wav2Vec2Processor,
     Wav2Vec2CTCTokenizer,
     Wav2Vec2FeatureExtractor,
@@ -276,7 +278,7 @@ def main():
     logger.info(f"Data loading device: {data_device}")
 
     # Load model
-    logger.info(f"Loading WavLM-CTC model from {args.wavlm_model}")
+    logger.info(f"Loading CTC model from {args.wavlm_model}")
     if args.wavlm_model.endswith(".pt"):
         if not args.vocab_path:
             raise ValueError("--vocab-path is required when using a .pt checkpoint")
@@ -285,8 +287,10 @@ def main():
         )
         model = model.to("cuda")
     else:
-        model = WavLMForCTC.from_pretrained(args.wavlm_model).to("cuda")
-        processor = Wav2Vec2Processor.from_pretrained(args.wavlm_model)
+        # AutoModelForCTC / AutoProcessor so any CTC encoder works — WavLM,
+        # HuBERT (e.g. Japanese kushinada-hubert), wav2vec2, …
+        model = AutoModelForCTC.from_pretrained(args.wavlm_model).to("cuda")
+        processor = AutoProcessor.from_pretrained(args.wavlm_model)
     model.eval()
 
     logger.info(

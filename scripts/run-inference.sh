@@ -53,6 +53,12 @@ MODE="${MODE:-eval}"
 # Inference type: "nobias", "gt", or "filter"
 INFER_TYPE="${INFER_TYPE:-nobias}"
 
+# Prompt/filter language: "en" or "ja"
+LANGUAGE="${LANGUAGE:-en}"
+
+# Speech encoder family: "auto", "wavlm", "hubert", "wav2vec2", "whisper"
+ENCODER_TYPE="${ENCODER_TYPE:-auto}"
+
 # Output directory for results (auto: <exp-dir>/inference/<infer_type>/)
 OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/inference/${INFER_TYPE}}"
 
@@ -79,6 +85,8 @@ BIAS_LIST_JSON="${BIAS_LIST_JSON:-}"
 CTC_FILE="${CTC_FILE:-}"
 
 # --- Filter parameters ---
+# Method: F1/F2/F3 (English) or ja (Japanese reading-based filter)
+FILTER_METHOD="${FILTER_METHOD:-F3}"
 COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon/LibriSpeech/common_words_5k.txt}"
 PROBABILITY_THRESHOLD="${PROBABILITY_THRESHOLD:-0.9}"
 WORD_NUM="${WORD_NUM:-15}"
@@ -153,6 +161,8 @@ CMD="CUDA_VISIBLE_DEVICES=$USE_DEVICE python3 src/inference/inference.py \
     --num-beams $NUM_BEAMS \
     --max-new-tokens $MAX_NEW_TOKENS \
     --num-workers $NUM_WORKERS \
+    --language $LANGUAGE \
+    --encoder-type $ENCODER_TYPE \
     --data-device $DATA_DEVICE"
     
 
@@ -177,6 +187,7 @@ if [ -n "$CTC_FILE" ]; then
 fi
 
 if [ "$INFER_TYPE" = "filter" ]; then
+    CMD="$CMD --filter-method $FILTER_METHOD"
     CMD="$CMD --common-words-path $COMMON_WORDS_PATH"
     CMD="$CMD --probability-threshold $PROBABILITY_THRESHOLD"
     CMD="$CMD --word-num $WORD_NUM"
@@ -190,6 +201,8 @@ echo "CTC-assisted LLM ASR – Inference"
 echo "========================================"
 echo "Mode:           $MODE"
 echo "Infer type:     $INFER_TYPE"
+echo "Language:       $LANGUAGE"
+echo "Encoder type:   $ENCODER_TYPE"
 echo "Checkpoint:     $CHECKPOINT"
 echo "Output:         $OUTPUT_DIR"
 if [ "$MODE" = "eval" ]; then
@@ -205,6 +218,7 @@ if [ "$INFER_TYPE" = "gt" ] || [ "$INFER_TYPE" = "filter" ]; then
     echo "Bias list:      $BIAS_LIST_JSON"
 fi
 if [ "$INFER_TYPE" = "filter" ]; then
+    echo "Filter method:  $FILTER_METHOD"
     echo "CTC file:       $CTC_FILE"
     echo "Threshold:      $PROBABILITY_THRESHOLD"
     echo "Word num:       $WORD_NUM"

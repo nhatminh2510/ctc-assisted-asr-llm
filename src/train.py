@@ -76,13 +76,14 @@ class Trainer:
             batch_size=config["batch_size"],
             shuffle=True,
             collate_fn=get_collate_fn(
-                self.model.encoder_processor,
+                self.model.encoder,
                 self.model.decoder_processor,
                 mode="train",
                 device=self.data_loading_device,
                 p_keep=self.data_config.get("p_keep", 0.5),
                 n_order_max=self.data_config.get("n_order_max", 4),
                 n_phrases=self.data_config.get("n_phrases", 1),
+                language=self.data_config.get("language", "en"),
             ),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
@@ -94,13 +95,14 @@ class Trainer:
                 batch_size=config["batch_size"],
                 shuffle=False,
                 collate_fn=get_collate_fn(
-                    self.model.encoder_processor,
+                    self.model.encoder,
                     self.model.decoder_processor,
                     mode="eval",
                     device=self.data_loading_device,
                     p_keep=self.data_config.get("p_keep", 0.5),
                     n_order_max=self.data_config.get("n_order_max", 4),
                     n_phrases=self.data_config.get("n_phrases", 1),
+                    language=self.data_config.get("language", "en"),
                 ),
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,
@@ -536,6 +538,7 @@ def main():
         freeze_encoder=model_config["freeze_encoder"],
         freeze_llm=model_config["freeze_llm"],
         use_lora=model_config.get("use_lora", False),
+        encoder_type=model_config.get("encoder_type", "auto"),
     )
 
     train_config = full_config["training"]

@@ -19,6 +19,17 @@ protobuf>=3.20.0
 librosa>=0.10.0
 soundfile>=0.12.0
 
+# Japanese support (for encoder_type=whisper + hotword_filter_ja / language=ja)
+# The filter degrades gracefully: with none of the analyzers it falls back to
+# pykakasi and then to a character split, but fugashi/SudachiPy give the best
+# segmentation and context readings.
+jaconv>=0.3            # kana / width normalisation
+pykakasi>=2.2.1        # kanji -> reading fallback (no external dictionary)
+fugashi>=1.3.0         # MeCab wrapper (optional, best quality)
+unidic-lite>=1.0.8     # dictionary for fugashi (optional)
+sudachipy>=0.6.7       # alternative analyzer (optional)
+sudachidict-core>=20230927  # dictionary for SudachiPy (optional)
+
 # Utilities
 editdistance>=0.6.2
 python-Levenshtein>=0.25.0

@@ -52,7 +52,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.dataset.librispeech_dataset import LibriSpeechDataset
+from src.dataset.kaldi_dataset import CSJCorpusDataset
 from src.utils.config_utils import load_config, set_seed, setup_logging
 from src.utils.japanese import to_katakana, has_reading_backend
 
@@ -366,13 +366,13 @@ def train(cfg: Dict[str, Any], checkpoint: Optional[str] = None) -> None:
     data_dir = cfg["data"]["data_dir"]
     train_ds = ConcatDataset(
         [
-            LibriSpeechDataset(data_path=data_dir, split=s)
+            CSJCorpusDataset(split=s, base_dir=data_dir)
             for s in cfg["data"]["train_splits"]
         ]
     )
     val_ds = ConcatDataset(
         [
-            LibriSpeechDataset(data_path=data_dir, split=s)
+            CSJCorpusDataset(split=s, base_dir=data_dir)
             for s in cfg["data"]["val_splits"]
         ]
     )

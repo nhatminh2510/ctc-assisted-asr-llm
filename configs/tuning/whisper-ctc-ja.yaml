@@ -51,17 +51,18 @@ precision:
   bf16: true                         # Whisper trains well in bf16
 
 # -- Data --
-# LibriSpeechDataset expects a LibriSpeech-like layout
-# (speaker/chapter/*.trans.txt + *.flac); point it at a Japanese corpus laid out
-# the same way. Transcripts are converted to katakana on the fly for the labels.
+# CSJ in ESPnet dump/raw layout (Kaldi text/wav.scp). ``data_dir`` is the
+# dump/raw root (here the data/csj symlink); ``*_splits`` are sub-directories.
+# The *_whisper_like_clean sets carry plain kanji+kana transcripts (no tags),
+# converted to katakana on the fly for the CTC labels.
 data:
   data_dir: /home/25/minh/ctc-assisted-asr-llm/data/csj
   sampling_rate: 16000
   vocab_sample_size: 20000
   train_splits:
-    - train
+    - train_nodup_whisper_like_clean
   val_splits:
-    - dev
+    - train_dev_whisper_like_clean
 
 # -- Evaluation & checkpointing --
 eval:

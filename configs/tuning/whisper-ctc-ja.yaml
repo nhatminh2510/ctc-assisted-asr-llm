@@ -1,0 +1,87 @@
+# =============================================================================
+# Whisper-encoder CTC fine-tuning (Japanese kana targets)
+#
+# Trains a kana-emitting CTC model on top of the frozen-then-unfrozen Whisper
+# encoder. The resulting model produces a pure-kana hypothesis that feeds the
+# Japanese hotword filter (src/inference/hotword_filter_ja.py) via decode_ctc.py.
+#
+# Run inside a container with a kana backend (fugashi/SudachiPy), e.g.
+#   /home/25/minh/Prefix-tree/prefix-tree.sif
+# =============================================================================
+
+# -- Model --
+model:
+  name: openai/whisper-medium        # d_model 1024 (small=768, large-v3=1280)
+  vocab_special_tokens: ["<pad>", "<unk>"]
+  ctc_loss_reduction: mean
+  ctc_zero_infinity: true            # ignore inf losses (labels longer than frames)
+  dropout: 0.0
+
+# -- Freeze strategy --
+# Phase 1 (0 -> unfreeze_step): only the CTC head (lm_head) trains.
+# Phase 2 (unfreeze_step -> end): whole encoder trains except the conv front-end.
+freeze:
+  feature_encoder: true              # conv1/conv2 always frozen
+  unfreeze_step: 8000
+
+# -- Learning-rate schedule (warmup -> constant -> exponential decay) --
+schedule:
+  max_steps: 60000
+  warmup_steps: 4000
+  constant_steps: 20000
+  decay_steps: 36000                 # max_steps - warmup - constant
+  decay_final_ratio: 0.05
+
+# -- Optimizer (AdamW) --
+optimizer:
+  peak_lr: 5.0e-5
+  weight_decay: 0.005
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+# -- Batch / accumulation --
+training:
+  batch_size: 8                      # per-device (each sample is a fixed 30 s mel)
+  gradient_accumulation_steps: 2
+  gradient_checkpointing: false      # set true to trade compute for memory
+
+# -- Mixed precision --
+precision:
+  fp16: false
+  bf16: true                         # Whisper trains well in bf16
+
+# -- Data --
+# LibriSpeechDataset expects a LibriSpeech-like layout
+# (speaker/chapter/*.trans.txt + *.flac); point it at a Japanese corpus laid out
+# the same way. Transcripts are converted to katakana on the fly for the labels.
+data:
+  data_dir: /home/25/minh/ctc-assisted-asr-llm/data/csj
+  sampling_rate: 16000
+  vocab_sample_size: 20000
+  train_splits:
+    - train
+  val_splits:
+    - dev
+
+# -- Evaluation & checkpointing --
+eval:
+  eval_steps: 4000
+  logging_steps: 100
+  save_steps: 8000
+  save_total_limit: 2
+  metric_for_best_model: cer         # character error rate on kana
+  greater_is_better: false
+  load_best_model_at_end: true
+
+# -- Dataloader / performance --
+dataloader:
+  num_workers: 8
+  pin_memory: true
+
+# -- Output --
+output:
+  output_dir: exp/whisper-ft-ctc_ja
+  report_to: [tensorboard]
+
+# -- Reproducibility --
+seed: 42

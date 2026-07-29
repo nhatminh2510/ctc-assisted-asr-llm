@@ -9,11 +9,11 @@
 model:
   # Any Whisper checkpoint works; the encoder tower is used as the speech
   # encoder. large-v3 = d_model 1280, medium = 1024, small = 768, base = 512.
-  encoder_path: openai/whisper-large-v3
+  encoder_path: openai/whisper-medium
   encoder_type: whisper              # "auto" also detects Whisper from the config
   # Use a Japanese-capable causal LLM as the decoder, e.g.
   #   tokyotech-llm/Swallow-7b-instruct-hf, elyza/ELYZA-japanese-Llama-2-7b, ...
-  llm_model_path: tokyotech-llm/Swallow-7b-instruct-hf
+  llm_model_path: tokyotech-llm/Llama-3.1-Swallow-8B-Instruct-v0.5
   freeze_encoder: true
   freeze_llm: true
   use_lora: false

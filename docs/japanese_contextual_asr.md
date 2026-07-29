@@ -102,11 +102,37 @@ USER: 音声を文字に書き起こしてください。次のキーワード�
 
 ---
 
+## The CTC model that feeds the filter
+
+The hotword filter runs on a CTC hypothesis. Two options:
+
+* **Off-the-shelf**: any Japanese CTC model (e.g.
+  `imprt/kushinada-hubert-large-laborotv2-asr`) via `decode_ctc.py`
+  (`AutoModelForCTC`).
+* **Whisper-encoder kana-CTC** (`src/finetune/whisper_ft_ctc.py`): take
+  Whisper's encoder, add a CTC head, and fine-tune it against **kana** targets
+  so the model emits a pure-kana hypothesis directly — small, fast, and a
+  natural pseudo-label source for the reading-based filter. There is no
+  `WhisperForCTC` in transformers, so the script defines `WhisperEncoderForCTC`
+  (encoder → dropout → Linear → `F.ctc_loss`, blank = pad id) and trains it with
+  a HF `Trainer`. Kana targets come from `to_katakana`, so run it in a container
+  with a kana backend:
+
+  ```bash
+  singularity exec --writable-tmpfs --nv --bind $BINDS --no-home \
+      /home/25/minh/Prefix-tree/prefix-tree.sif \
+      bash scripts/run-ft-whisper-ctc.sh          # configs/tuning/whisper-ctc-ja.yaml
+  ```
+
+  The saved `exp/whisper-ft-ctc_ja/final` directory loads straight into
+  `decode_ctc.py` to produce the `*_ctc.tsv` pseudo-labels.
+
 ## End-to-end (Japanese)
 
 ```bash
 # 1. CTC pseudo-labels from a Japanese CTC model (AutoModelForCTC)
 WAVLM_MODEL=imprt/kushinada-hubert-large-laborotv2-asr bash scripts/decode-ctc.sh
+#    (or your own Whisper kana-CTC:  WAVLM_MODEL=exp/whisper-ft-ctc_ja/final)
 
 # 2. Bias lists with Japanese segmentation
 python pyscripts/create_bias_list.py --language ja \

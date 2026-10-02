@@ -29,8 +29,8 @@ from src.utils.train_utils import (
     get_linear_schedule,
     tensorboard_log_dir,
 )
-from src.utils.compute_wer import compute_wer
-from src.dataset.librispeech_dataset import LibriSpeechDataset
+from src.utils.compute_wer import score_transcripts
+from src.dataset.factory import build_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,9 @@ class Trainer:
         self.val_dataset = val_dataset
         self.config = config
         self.data_config = data_config or {}
+        # Eval metric: WER for English, CER for Japanese (no word boundaries).
+        self.language = self.data_config.get("language", "en")
+        self.metric = "cer" if self.language == "ja" else "wer"
 
         self.device = torch.device("cuda")
         self.model.to(self.device)
@@ -83,7 +86,7 @@ class Trainer:
                 p_keep=self.data_config.get("p_keep", 0.5),
                 n_order_max=self.data_config.get("n_order_max", 4),
                 n_phrases=self.data_config.get("n_phrases", 1),
-                language=self.data_config.get("language", "en"),
+                language=self.language,
             ),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
@@ -102,7 +105,7 @@ class Trainer:
                     p_keep=self.data_config.get("p_keep", 0.5),
                     n_order_max=self.data_config.get("n_order_max", 4),
                     n_phrases=self.data_config.get("n_phrases", 1),
-                    language=self.data_config.get("language", "en"),
+                    language=self.language,
                 ),
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,
@@ -263,25 +266,23 @@ class Trainer:
                 f"Refs: {batch['transcription']}"
             )
 
-        hyps = [self.normalizer(hyp) for hyp in hyps]
-        refs = [
-            (
-                self.normalizer(ref)
-                if isinstance(ref, str)
-                else [self.normalizer(ref_i) for ref_i in ref]
-            )
-            for ref in refs
-        ]
+        # WER for English, CER for Japanese (``wer`` / ``best_wer`` hold the
+        # error rate under ``self.metric``).
+        metric, wer, hyps, refs = score_transcripts(
+            hyps,
+            refs,
+            language=self.language,
+            normalizer=self.normalizer,
+        )
 
         avg_loss = total_loss / max(num_batches, 1)
-        wer = compute_wer(hyps, refs) if hyps and refs else 0.0
         logger.info(
-            f"Step {self.global_step} | Eval Loss: {avg_loss:.4f} | WER: {wer:.4f}"
+            f"Step {self.global_step} | Eval Loss: {avg_loss:.4f} | {metric.upper()}: {wer:.4f}"
         )
 
         if self.writer:
             self.writer.add_scalar("eval/loss", avg_loss, self.global_step)
-            self.writer.add_scalar("eval/wer", wer, self.global_step)
+            self.writer.add_scalar(f"eval/{self.metric}", wer, self.global_step)
 
         # Switch back to training log file
         if self.train_log_file:
@@ -360,7 +361,8 @@ class Trainer:
                             logger.info(f"Evaluating at step {self.global_step}...")
                             val_loss, wer = self.evaluate()
                             logger.info(
-                                f"Step {self.global_step} | Eval Loss: {val_loss:.4f} | WER: {wer:.4f}"
+                                f"Step {self.global_step} | Eval Loss: {val_loss:.4f} | "
+                                f"{self.metric.upper()}: {wer:.4f}"
                             )
                             # if val_loss < self.best_loss:
                             #     self.best_loss = val_loss
@@ -380,7 +382,8 @@ class Trainer:
                             if wer < self.best_wer:
                                 self.best_wer = wer
                                 best_wer_path = (
-                                    self.checkpoint_dir / "best_wer_model.pt"
+                                    self.checkpoint_dir
+                                    / f"best_{self.metric}_model.pt"
                                 )
                                 save_checkpoint(
                                     self.model,
@@ -390,9 +393,11 @@ class Trainer:
                                     val_loss,
                                     self.best_wer,
                                     str(best_wer_path),
+                                    metric=self.metric,
                                 )
                                 logger.info(
-                                    f"New best WER model at step {self.global_step}: WER={wer:.4f}"
+                                    f"New best {self.metric.upper()} model at step "
+                                    f"{self.global_step}: {self.metric.upper()}={wer:.4f}"
                                 )
 
                         # Save checkpoint
@@ -411,6 +416,7 @@ class Trainer:
                                 actual_loss,
                                 self.best_wer,
                                 str(ckpt_path),
+                                metric=self.metric,
                             )
                             logger.info(f"Saved checkpoint at step {self.global_step}")
                             self._cleanup_checkpoints()
@@ -505,27 +511,24 @@ def main():
         sys.exit(1)
 
     data_config = full_config.get("data", {})
-    train_splits = [
-        "train-clean-100",
-        "train-clean-360",
-        "train-other-500",
-    ]
+    # Dataset layout + splits come from the config (defaults: LibriSpeech).
+    dataset_type = data_config.get("dataset", "auto")
+    train_splits = data_config.get(
+        "train_splits", ["train-clean-100", "train-clean-360", "train-other-500"]
+    )
     logger.info(f"Train splits: {', '.join(train_splits)}")
     train_dataset = ConcatDataset(
         [
-            LibriSpeechDataset(data_path=data_dir, split=s, config=data_config)
+            build_dataset(data_dir, s, dataset_type, config=data_config)
             for s in train_splits
         ]
     )
 
-    val_splits = [
-        "dev-clean",
-        # "dev-other",
-    ]
+    val_splits = data_config.get("val_splits", ["dev-clean"])
     logger.info(f"Val splits: {', '.join(val_splits)}")
     val_dataset = ConcatDataset(
         [
-            LibriSpeechDataset(data_path=data_dir, split=s, config=data_config)
+            build_dataset(data_dir, s, dataset_type, config=data_config)
             for s in val_splits
         ]
     )
@@ -578,7 +581,7 @@ def main():
             "status": "completed",
             "max_steps": train_config["max_steps"],
             "best_loss": float(trainer.best_loss),
-            "best_wer": float(trainer.best_wer),
+            f"best_{trainer.metric}": float(trainer.best_wer),
             "results_dir": str(output_dir),
         },
         str(output_dir / "training_info.yaml"),

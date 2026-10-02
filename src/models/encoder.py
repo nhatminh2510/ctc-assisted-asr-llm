@@ -25,7 +25,9 @@ of the code — collators, ``model.embed`` — stays encoder-agnostic.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
@@ -51,6 +53,31 @@ _CTC_MODEL_TYPES = {
     "sew-d",
 }
 _WHISPER_MODEL_TYPES = {"whisper"}
+
+# Written by src/finetune/whisper_ft_ctc.py next to each Whisper-CTC checkpoint.
+WHISPER_CTC_CONFIG = "whisper_ctc_config.json"
+
+
+def whisper_ctc_base(encoder_id: str) -> Optional[str]:
+    """Return the base Whisper id if *encoder_id* is a Whisper-CTC fine-tune dir
+    (``final/`` or ``checkpoint-*`` from ``whisper_ft_ctc.py``), else ``None``.
+
+    Such dirs hold ``WhisperEncoderForCTC`` weights (``encoder.*`` + ``lm_head.*``)
+    and no ``config.json``, so ``WhisperModel.from_pretrained`` cannot load them.
+    """
+    path = Path(encoder_id)
+    if not path.is_dir() or (path / "config.json").exists():
+        return None
+    meta = path / WHISPER_CTC_CONFIG
+    if meta.exists():
+        return json.loads(meta.read_text())["whisper_id"]
+    if (path / "model.safetensors").exists():
+        raise ValueError(
+            f"{encoder_id} looks like a Whisper-CTC checkpoint but has no "
+            f"{WHISPER_CTC_CONFIG}; add one with the base model, e.g. "
+            '{"whisper_id": "openai/whisper-medium"}'
+        )
+    return None
 
 
 def _load_feature_extractor(encoder_id: str):
@@ -138,14 +165,41 @@ class SpeechEncoder(nn.Module):
     def _init_whisper(self, encoder_id: str) -> None:
         from transformers import WhisperModel
 
-        self.processor, self.feature_extractor = _load_feature_extractor(encoder_id)
-        whisper = WhisperModel.from_pretrained(encoder_id)
+        base_id = whisper_ctc_base(encoder_id)
+        fe_source = encoder_id
+        if base_id and not (Path(encoder_id) / "preprocessor_config.json").exists():
+            fe_source = base_id
+        self.processor, self.feature_extractor = _load_feature_extractor(fe_source)
+        whisper = WhisperModel.from_pretrained(base_id or encoder_id)
         # We only need the encoder tower.
         self.model = whisper.get_encoder()
+        if base_id:
+            self._load_whisper_ctc_encoder(encoder_id, base_id)
         self.hidden_size = whisper.config.d_model
         self.input_key = "input_features"
         # Whisper's second conv layer has stride 2 (mel frames -> output frames).
         self._max_output_frames = whisper.config.max_source_positions  # 1500
+
+    def _load_whisper_ctc_encoder(self, ckpt_dir: str, base_id: str) -> None:
+        """Overwrite the base encoder with the CTC-fine-tuned ``encoder.*`` weights
+        (the CTC ``lm_head`` is dropped)."""
+        weights = Path(ckpt_dir) / "model.safetensors"
+        if weights.exists():
+            from safetensors.torch import load_file
+
+            state = load_file(str(weights))
+        else:
+            state = torch.load(Path(ckpt_dir) / "pytorch_model.bin", map_location="cpu")
+        enc_state = {
+            k[len("encoder."):]: v for k, v in state.items() if k.startswith("encoder.")
+        }
+        self.model.load_state_dict(enc_state, strict=True)
+        logger.info(
+            "Loaded Whisper-CTC fine-tuned encoder (%d tensors) from %s on top of %s",
+            len(enc_state),
+            ckpt_dir,
+            base_id,
+        )
 
     def _init_ctc(self, encoder_id: str) -> None:
         self.processor, self.feature_extractor = _load_feature_extractor(encoder_id)

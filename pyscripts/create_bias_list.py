@@ -20,6 +20,16 @@ Usage:
         --word-freq-path data/all_words.count.txt \
         --num-distractors 100
 
+Japanese (CSJ, Kaldi layout), computing word frequencies from the train split:
+    python pyscripts/create_bias_list.py --language ja \
+        --data-dir data/csj \
+        --freq-splits train_nodup_whisper_like_clean \
+        --word-freq-path data/lexicon/csj/all_words.count.txt \
+        --common-words-path data/lexicon/csj/common_words_5k.txt \
+        --all-rare-words-path data/lexicon/csj/all_rare_words.txt \
+        --output-dir data/lexicon/csj/hotwords \
+        --test-splits eval1_whisper_like_clean eval2_whisper_like_clean eval3_whisper_like_clean
+
 Based on: https://arxiv.org/pdf/2411.06437
 Reference: https://github.com/X-LANCE/SLAM-LLM/tree/main/examples/contextual_asr
 """
@@ -34,6 +44,7 @@ from collections import Counter
 from typing import Callable, Dict, List, Set, Tuple
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+from src.dataset.factory import DATASET_TYPES, read_kaldi_text, resolve_dataset_type
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +118,16 @@ def load_librispeech_transcripts(data_dir: str, split: str) -> Dict[str, str]:
     return transcripts
 
 
+def load_transcripts(data_dir: str, split: str, dataset_type: str = "auto") -> Dict[str, str]:
+    """Load ``utt_id -> transcript`` for a LibriSpeech or CSJ (Kaldi) split."""
+    if resolve_dataset_type(data_dir, split, dataset_type) == "csj":
+        text_path = Path(data_dir) / split / "text"
+        if not text_path.exists():
+            raise FileNotFoundError(f"Kaldi text file not found: {text_path}")
+        return read_kaldi_text(str(text_path))
+    return load_librispeech_transcripts(data_dir, split)
+
+
 # ---------------------------------------------------------------------------
 # Word frequency loading
 # ---------------------------------------------------------------------------
@@ -146,6 +167,7 @@ def compute_word_frequencies(
     output_path: str,
     tokenize: Callable[[str], List[str]] = str.split,
     splits: List[str] = ("train-clean-100", "train-clean-360", "train-other-500"),
+    dataset_type: str = "auto",
 ) -> str:
     """
     Compute word frequencies from all LibriSpeech transcriptions and save to a TSV file.
@@ -164,12 +186,13 @@ def compute_word_frequencies(
     # Process all splits (train + test) to get comprehensive frequencies
     for split in splits:
         print(f"Processing split for word frequencies: {split}")
-        transcripts = load_librispeech_transcripts(data_dir, split)
+        transcripts = load_transcripts(data_dir, split, dataset_type)
         for text in transcripts.values():
             words = tokenize(text)
             word_counter.update(w.lower() for w in words)
 
     # Save word frequencies to output path
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         for word, count in sorted(
             word_counter.items(), key=lambda x: x[1], reverse=True
@@ -337,12 +360,12 @@ def save_bias_lists(
 
     # 1. Per-utterance bias lists
     json_path = out / f"{split}_bias_list.json"
-    with open(json_path, "w") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     # 2. Global flat rare words (one per line)
     global_path = out / f"{split}_rare_words.txt"
-    with open(global_path, "w") as f:
+    with open(global_path, "w", encoding="utf-8") as f:
         for w in sorted(rare_words):
             f.write(w + "\n")
 
@@ -361,6 +384,23 @@ def parse_args():
         type=str,
         default="data/LibriSpeech",
         help="Root directory of LibriSpeech data",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=list(DATASET_TYPES),
+        default="auto",
+        help="Dataset layout: librispeech, csj (Kaldi text), or auto-detect",
+    )
+    parser.add_argument(
+        "--freq-splits",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "If set, (re)compute --word-freq-path from these (training) splits "
+            "with the language's tokenizer before building the lists"
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -427,6 +467,16 @@ def main():
     tokenize = get_word_tokenizer(args.language)
     print(f"Language: {args.language}")
 
+    # Step 0 (optional): compute word frequencies from training splits
+    if args.freq_splits:
+        compute_word_frequencies(
+            args.data_dir,
+            args.word_freq_path,
+            tokenize=tokenize,
+            splits=args.freq_splits,
+            dataset_type=args.dataset,
+        )
+
     # Step 1: Load word frequencies
     print(f"Loading word frequencies from: {args.word_freq_path}")
     word_freq = load_word_frequencies(args.word_freq_path)
@@ -452,8 +502,10 @@ def main():
     for split in args.test_splits:
         print(f"\nProcessing split: {split}")
 
-        transcripts = load_librispeech_transcripts(args.data_dir, split)
+        transcripts = load_transcripts(args.data_dir, split, args.dataset)
         print(f"  Utterances: {len(transcripts):,}")
+        if not transcripts:
+            raise SystemExit(f"ERROR: no transcripts loaded for split {split!r}")
 
         rare_words = find_rare_words(transcripts, rare_word_set, tokenize=tokenize)
         print(f"  Rare words in {split}: {len(rare_words):,}")

@@ -88,6 +88,19 @@ USER: 音声を文字に書き起こしてください。次のキーワード�
  ASSISTANT:
 ```
 
+The chat scaffold follows the LLM's tokenizer (`src/utils/create_prompt.py`):
+the Vicuna `USER:/ASSISTANT:` + `</s>` format above for Vicuna/LLaMA-2 models,
+and the Llama-3 header format for Llama-3-family decoders (e.g.
+`tokyotech-llm/Llama-3.1-Swallow-8B-Instruct-v0.5`), whose answers end with
+`<|eot_id|>`:
+
+```
+<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+音声を文字に書き起こしてください。次のキーワードが役立つかもしれません：「橋（ハシ）、…」。<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+```
+
 ### Key parameters (`configs/inference_ja.yaml`)
 
 | Param                  | Default | Meaning                                             |
@@ -124,26 +137,73 @@ The hotword filter runs on a CTC hypothesis. Two options:
       bash scripts/run-ft-whisper-ctc.sh          # configs/tuning/whisper-ctc-ja.yaml
   ```
 
-  The saved `exp/whisper-ft-ctc_ja/final` directory loads straight into
-  `decode_ctc.py` to produce the `*_ctc.tsv` pseudo-labels.
+  `WhisperEncoderForCTC` is a plain `nn.Module` (no `config.json`), so
+  `AutoModelForCTC` cannot load it. `decode_ctc.py` detects such a directory
+  (`final/` or `checkpoint-*`) and loads it with `load_whisper_ctc`. New runs
+  write `whisper_ctc_config.json` + the vocab into every checkpoint; for
+  checkpoints saved before that, pass `BASE_MODEL=openai/whisper-medium`.
 
-## End-to-end (Japanese)
+  Whisper always encodes a 30 s window. Frames past the end of the audio never
+  receive CTC loss, so their argmax is arbitrary; the model therefore forces
+  those frames to blank whenever an `attention_mask` is given. Without this,
+  greedy decoding over all 1500 frames appends garbage and the reported CER
+  exceeds 100% (the `eval_cer` logged by the 70k-step run was affected: ~1.1–1.4,
+  while the same `checkpoint-40000` decodes CSJ eval1/2/3 at 5.9 / 7.9 / 7.2%
+  kana CER).
+
+## Metrics
+
+Japanese has no spaces, so WER is meaningless. With `language: ja` (training
+config) or `LANGUAGE=ja` (inference / CTC decode) the scripts report **CER**
+after NFKC + removing whitespace/punctuation (`src/utils/compute_wer.py`).
+`decode_ctc.py` additionally reports `cer_kana` (CER on katakana readings),
+the right number for a kana-only CTC model; its `cer_surface` against the
+kanji+kana reference is >100% by design. Summaries keep the key `"wer"` for
+compatibility and add `"metric": "cer"`. Training logs `eval/cer` to
+TensorBoard and saves the best model as `checkpoints/best_cer_model.pt`, which
+`run-inference.sh` / `run-all-infer.sh` pick up by default when `LANGUAGE=ja`.
+
+An empty dataset (wrong `--data-dir` / `--splits`) is now an error instead of
+a silent 0% error rate.
+
+## End-to-end (Japanese, CSJ)
+
+CSJ is read from the ESPnet `dump/raw` layout (`data/csj` symlink, Kaldi
+`text` / `wav.scp`); `--dataset auto` picks it when `<split>/wav.scp` exists.
+Test sets: `eval{1,2,3}_whisper_like_clean` (1230 / 1113 / 1308 utterances).
 
 ```bash
-# 1. CTC pseudo-labels from a Japanese CTC model (AutoModelForCTC)
-WAVLM_MODEL=imprt/kushinada-hubert-large-laborotv2-asr bash scripts/decode-ctc.sh
-#    (or your own Whisper kana-CTC:  WAVLM_MODEL=exp/whisper-ft-ctc_ja/final)
+EVAL="eval1_whisper_like_clean eval2_whisper_like_clean eval3_whisper_like_clean"
+SIF=/home/25/minh/Prefix-tree/prefix-tree.sif
+BINDS=/home,/home-local,/CDshare,/kailab,/App,/LabWork,/UserTmp,/local,/Mirror
+run() { singularity exec --writable-tmpfs --nv --bind $BINDS --no-home $SIF "$@"; }
 
-# 2. Bias lists with Japanese segmentation
-python pyscripts/create_bias_list.py --language ja \
-    --data-dir <corpus> --output-dir data/hotwords_ja \
-    --word-freq-path data/ja_words.count.txt
+# 1. CTC pseudo-labels (Whisper kana-CTC; or WAVLM_MODEL=imprt/kushinada-hubert-large-laborotv2-asr)
+run env WAVLM_MODEL=exp/whisper-ft-ctc_ja/checkpoint-40000 BASE_MODEL=openai/whisper-medium \
+    DATA_DIR=data/csj LANGUAGE=ja OUTPUT_DIR=exp/whisper-ft-ctc_ja/ctc_decode \
+    SPLITS="$EVAL" bash scripts/decode-ctc.sh
 
-# 3. Filtered inference: Japanese filter + Japanese prompt + Whisper encoder
-INFER_TYPE=filter FILTER_METHOD=ja LANGUAGE=ja ENCODER_TYPE=whisper \
+# 2. Bias lists (word frequencies from the CSJ train split)
+run env DATA_DIR=data/csj LANGUAGE=ja LEXICON_DIR=data/lexicon/csj \
+    OUTPUT_DIR=data/lexicon/csj/hotwords \
+    WORD_FREQ_PATH=data/lexicon/csj/all_words.count.txt \
+    COMMON_WORDS_PATH=data/lexicon/csj/common_words_5k.txt \
+    ALL_RARE_WORDS_PATH=data/lexicon/csj/all_rare_words.txt \
+    FREQ_SPLITS=train_nodup_whisper_like_clean TEST_SPLITS="$EVAL" \
+    bash scripts/make-bias-list.sh
+
+# 3. Train the Whisper + LLM projector on CSJ (config sets dataset/splits)
+run python3 src/train.py --config configs/train_whisper_llm_ja_contextual.yaml \
+    --data-dir data/csj --output-dir exp/whisper_llm_ja
+
+# 4. Filtered inference, scored with CER
+H=data/lexicon/csj/hotwords; C=exp/whisper-ft-ctc_ja/ctc_decode
+run env EXP_DIR=exp/whisper_llm_ja DATA_DIR=data/csj SPLITS="$EVAL" \
+    INFER_TYPE=filter FILTER_METHOD=ja LANGUAGE=ja ENCODER_TYPE=whisper \
     INFER_CONFIG=configs/inference_ja.yaml \
-    BIAS_LIST_JSON="data/hotwords_ja/test_bias_list.json" \
-    CTC_FILE="exp/.../jp_ctc_decode/test_ctc.tsv" \
+    COMMON_WORDS_PATH=data/lexicon/csj/common_words_5k.txt \
+    BIAS_LIST_JSON="$(for s in $EVAL; do printf '%s ' $H/${s}_bias_list.json; done)" \
+    CTC_FILE="$(for s in $EVAL; do printf '%s ' $C/${s}_ctc.tsv; done)" \
     bash scripts/run-inference.sh
 ```
 

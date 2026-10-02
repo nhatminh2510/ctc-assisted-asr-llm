@@ -16,7 +16,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 USE_DEVICE=0
 CONFIG=configs/tuning/whisper-ctc-ja.yaml
-CHECKPOINT=                                   # set to resume, e.g. exp/whisper-ft-ctc_ja/checkpoint-8000
+CHECKPOINT=/home-local/minh/myhome/ctc-assisted-asr-llm/exp/whisper-ft-ctc_ja/checkpoint-70000                                   # set to resume, e.g. exp/whisper-ft-ctc_ja/checkpoint-8000
 OUTPUT_DIR=/home/25/minh/ctc-assisted-asr-llm/exp/whisper-ft-ctc_ja
 
 # ---- Optional CLI overrides (uncomment / edit as needed) ----

@@ -7,11 +7,25 @@
 #
 #   # Custom settings
 #   NUM_DISTRACTORS=200 bash make-bias-list.sh
+#
+#   # Japanese (CSJ): word frequencies computed from the train split
+#   DATA_DIR=data/csj LANGUAGE=ja LEXICON_DIR=data/lexicon/csj \
+#       OUTPUT_DIR=data/lexicon/csj/hotwords \
+#       WORD_FREQ_PATH=data/lexicon/csj/all_words.count.txt \
+#       COMMON_WORDS_PATH=data/lexicon/csj/common_words_5k.txt \
+#       ALL_RARE_WORDS_PATH=data/lexicon/csj/all_rare_words.txt \
+#       FREQ_SPLITS=train_nodup_whisper_like_clean \
+#       TEST_SPLITS="eval1_whisper_like_clean eval2_whisper_like_clean eval3_whisper_like_clean" \
+#       bash make-bias-list.sh
 # =============================================================================
 
 set -e
 
 DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech}"
+DATASET="${DATASET:-auto}"        # auto | librispeech | csj
+LANGUAGE="${LANGUAGE:-en}"        # en | ja (ja needs fugashi/SudachiPy/pykakasi)
+# Optional: (re)compute WORD_FREQ_PATH from these training splits first
+FREQ_SPLITS="${FREQ_SPLITS:-}"
 LEXICON_DIR="${LEXICON_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon}"
 mkdir -p "$LEXICON_DIR"
 OUTPUT_DIR="${OUTPUT_DIR:-${LEXICON_DIR}/LibriSpeech/hotwords}"
@@ -38,7 +52,7 @@ ALL_RARE_WORDS_PATH="${ALL_RARE_WORDS_PATH:-${LEXICON_DIR}/LibriSpeech/all_rare_
 # Validation
 # ---------------------------------------------------------------------------
 if [ ! -d "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ]; then
-    echo "ERROR: LibriSpeech data directory not found: $DATA_DIR"
+    echo "ERROR: Data directory not found: $DATA_DIR"
     exit 1
 fi
 
@@ -58,8 +72,16 @@ echo "Rare words:       $ALL_RARE_WORDS_PATH"
 echo "========================================"
 echo ""
 
+FREQ_ARGS=""
+if [ -n "$FREQ_SPLITS" ]; then
+    FREQ_ARGS="--freq-splits $FREQ_SPLITS"
+fi
+
 python3 pyscripts/create_bias_list.py \
     --data-dir "$DATA_DIR" \
+    --dataset "$DATASET" \
+    --language "$LANGUAGE" \
+    $FREQ_ARGS \
     --output-dir "$OUTPUT_DIR" \
     --test-splits $TEST_SPLITS \
     --word-freq-path "$WORD_FREQ_PATH" \

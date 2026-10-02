@@ -10,7 +10,7 @@ import yaml
 from torch.optim.lr_scheduler import LambdaLR
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.utils.create_prompt import create_prompt_with_hotwords
+from src.utils.create_prompt import create_prompt_with_hotwords, detect_prompt_format
 
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,7 @@ def save_checkpoint(
     wer: float,
     save_path: str,
     is_best: bool = False,
+    metric: str = "wer",
 ) -> None:
     """
     Lưu checkpoint của model.
@@ -99,6 +100,8 @@ def save_checkpoint(
         loss: Loss hiện tại
         save_path: Đường dẫn lưu checkpoint
         is_best: Có phải là best checkpoint không
+        metric: "wer" hoặc "cer" – metric của giá trị ``wer`` (key ``"wer"``
+            được giữ để tương thích ngược)
     """
     checkpoint = {
         "epoch": epoch,
@@ -106,6 +109,7 @@ def save_checkpoint(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "wer": wer,
+        "metric": metric,
         "loss": loss,
     }
 
@@ -191,9 +195,12 @@ def load_checkpoint(
     step = checkpoint.get("step", 0)
     loss = checkpoint.get("loss", float("inf"))
     wer = checkpoint.get("wer", float("inf"))
+    metric = checkpoint.get("metric", "wer").upper()
 
     logger.info(f"Checkpoint loaded from {checkpoint_path}")
-    logger.info(f"Epoch: {epoch}, Step: {step}, Loss: {loss:.4f}, WER: {wer:.4f}")
+    logger.info(
+        f"Epoch: {epoch}, Step: {step}, Loss: {loss:.4f}, {metric}: {wer:.4f}"
+    )
 
     return epoch, step, loss, wer
 
@@ -228,8 +235,10 @@ def get_collate_fn(
     Whisper log-mel are both exposed under the ``input_values`` key).
 
     ``language`` selects whitespace (``"en"``) vs morphological (``"ja"``)
-    hotword segmentation and the prompt instruction language.
+    hotword segmentation and the prompt instruction language. The chat scaffold
+    (Vicuna or Llama-3) is picked from ``decoder_processor``.
     """
+    prompt_format = detect_prompt_format(decoder_processor)
 
     def _generate_batch_hotwords(batch):
         """Generate shared hotwords from all batch transcriptions (per-batch).
@@ -262,7 +271,7 @@ def get_collate_fn(
 
         # 3. Create shared prompt (same for all samples in batch)
         shared_prompt_only = create_prompt_with_hotwords(
-            batch_hotwords, language=language
+            batch_hotwords, language=language, prompt_format=prompt_format
         )
 
         # 4. Compute prompt_length (same for all samples since prompt is shared)
@@ -273,7 +282,10 @@ def get_collate_fn(
         # 5. Create full text: shared_prompt + individual transcription + EOS
         full_texts = [
             create_prompt_with_hotwords(
-                batch_hotwords, sample["transcription"], language=language
+                batch_hotwords,
+                sample["transcription"],
+                language=language,
+                prompt_format=prompt_format,
             )
             for sample in batch
         ]

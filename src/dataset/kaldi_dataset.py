@@ -1,10 +1,15 @@
 import os
+import sys
 import logging
+from pathlib import Path
 
 import numpy as np
 import torch
 import torchaudio
 from torch.utils.data import Dataset
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.utils.dataset_utils import decode_audio, resample_audio
 
 logger = logging.getLogger(__name__)
 
@@ -214,16 +219,13 @@ class CSJCorpusDataset(torch.utils.data.Dataset):
         utt = self._utt_keys[idx]
         wav_path = self.utt2wav[utt]
         try:
-            waveform, sr = torchaudio.load(wav_path)
+            # soundfile-first decode (no torchcodec/FFmpeg dependency); the CSJ
+            # dump is already 16 kHz mono, so resample is usually a no-op.
+            audio, sr = decode_audio(wav_path)
+            audio = resample_audio(audio, sr, 16000)
         except Exception:
             logger.exception("Failed to load waveform | utt=%s | wav_path=%s", utt, wav_path)
             raise
-        if sr != 16000:
-            waveform = torchaudio.functional.resample(waveform, sr, 16000)
-        # Downmix to mono and expose the same dict interface as LibriSpeechDataset.
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        audio = waveform.squeeze(0).numpy().astype(np.float32)
         return {
             "audio": audio,
             "sampling_rate": 16000,

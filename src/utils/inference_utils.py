@@ -20,7 +20,7 @@ def load_bias_list(bias_list_json: str) -> Dict[str, Dict]:
         "transcription": "...",
     }
     """
-    with open(bias_list_json, "r") as f:
+    with open(bias_list_json, "r", encoding="utf-8") as f:
         data = json.load(f)
     result = {}
     for entry in data:
@@ -92,6 +92,7 @@ def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
     # 1. Summary JSON
     summary = {
         "split": split,
+        "metric": results.get("metric", "wer"),
         "wer": results["wer"],
         "num_samples": len(results["hyps"]),
     }
@@ -119,13 +120,13 @@ def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
             }
         )
     details_path = out / f"{split}_details.json"
-    with open(details_path, "w") as f:
+    with open(details_path, "w", encoding="utf-8") as f:
         json.dump(details, f, indent=2, ensure_ascii=False)
     logger.info(f"Details saved to {details_path}")
 
     # 3. Plain text hyp/ref files (for external scoring tools)
-    with open(out / f"{split}_hyp.txt", "w") as fh, open(
-        out / f"{split}_ref.txt", "w"
+    with open(out / f"{split}_hyp.txt", "w", encoding="utf-8") as fh, open(
+        out / f"{split}_ref.txt", "w", encoding="utf-8"
     ) as fr:
         for uid, hyp, ref in zip(results["utt_ids"], results["hyps"], results["refs"]):
             fh.write(f"{uid} {hyp}\n")

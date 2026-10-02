@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.models.projector import AudioProjector
 from src.models.encoder import SpeechEncoder
+from src.utils.create_prompt import LLAMA3_EOT_TOKEN, detect_prompt_format
 from typing import Optional, Tuple, List
 import logging
 
@@ -62,6 +63,19 @@ class CTCAssistedLLMASR(nn.Module):
         logger.info(
             f"Tokenizer loaded. Pad token: {self.decoder_processor.pad_token}, "
             f"EOS token: {self.decoder_processor.eos_token}"
+        )
+
+        # Chat scaffold for the prompt ("vicuna" or "llama3"), and the token ids
+        # that end the assistant turn during generation. Llama-3 answers are
+        # terminated with <|eot_id|>, which differs from eos_token on base models.
+        self.prompt_format = detect_prompt_format(self.decoder_processor)
+        self.stop_token_ids = [self.decoder_processor.eos_token_id]
+        if self.prompt_format == "llama3":
+            eot_id = self.decoder_processor.convert_tokens_to_ids(LLAMA3_EOT_TOKEN)
+            if eot_id not in self.stop_token_ids:
+                self.stop_token_ids.append(eot_id)
+        logger.info(
+            f"Prompt format: {self.prompt_format} | Stop token ids: {self.stop_token_ids}"
         )
 
         self.llm = AutoModelForCausalLM.from_pretrained(
@@ -255,7 +269,7 @@ class CTCAssistedLLMASR(nn.Module):
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
-            eos_token_id=self.decoder_processor.eos_token_id,
+            eos_token_id=self.stop_token_ids,
             pad_token_id=self.decoder_processor.pad_token_id,
             **kwargs,
         )

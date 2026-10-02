@@ -22,19 +22,19 @@ model:
 # Phase 2 (unfreeze_step -> end): whole encoder trains except the conv front-end.
 freeze:
   feature_encoder: true              # conv1/conv2 always frozen
-  unfreeze_step: 8000
+  unfreeze_step: 10000
 
 # -- Learning-rate schedule (warmup -> constant -> exponential decay) --
 schedule:
-  max_steps: 60000
-  warmup_steps: 4000
-  constant_steps: 20000
-  decay_steps: 36000                 # max_steps - warmup - constant
+  max_steps: 80000
+  warmup_steps: 8000
+  constant_steps: 32000
+  decay_steps: 40000                 # max_steps - warmup - constant
   decay_final_ratio: 0.05
 
 # -- Optimizer (AdamW) --
 optimizer:
-  peak_lr: 5.0e-5
+  peak_lr: 3.0e-5
   weight_decay: 0.005
   betas: [0.9, 0.999]
   eps: 1.0e-8
@@ -66,15 +66,18 @@ data:
 
 # -- Evaluation & checkpointing --
 eval:
-  eval_steps: 4000
+  eval_steps: 5000
   logging_steps: 100
-  save_steps: 8000
+  save_steps: 10000
   save_total_limit: 2
   metric_for_best_model: cer         # character error rate on kana
   greater_is_better: false
   load_best_model_at_end: true
 
 # -- Dataloader / performance --
+# The model is moved to CUDA before the Trainer forks its DataLoader workers.
+# The workers only do CPU work (audio decode, log-mel, kana), and 8 workers ran
+# the 70k-step exp/whisper-ft-ctc_ja run fine; drop to 0 if the loader hangs.
 dataloader:
   num_workers: 8
   pin_memory: true

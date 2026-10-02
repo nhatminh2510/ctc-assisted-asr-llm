@@ -62,6 +62,58 @@ logger = logging.getLogger(__name__)
 # dropped by the analyzer anyway.
 _LATIN_PUNCT_RE = re.compile(r"[\,\?\.\!\-\;\:\"'`]")
 _KANA_CHAR_RE = re.compile(r"[぀-ヿー]")
+_DIGIT_RUN_RE = re.compile(r"[0-9]+")
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+# Integer -> kanji numerals, so the analyzer reads them to kana (四十五 -> ヨンジュウゴ).
+# Arabic/full-width digits are NOT read to kana by fugashi/pykakasi and would
+# otherwise be dropped, silently deleting numeric content from the target.
+_KANJI_DIGITS = "〇一二三四五六七八九"
+_SMALL_UNITS = ["", "十", "百", "千"]
+_BIG_UNITS = ["", "万", "億", "兆", "京"]
+
+
+def _four_digits_to_kanji(g: int) -> str:
+    """1..9999 -> kanji (traditional: 十/百/千 drop a leading 一)."""
+    s = ""
+    for pos, unit in ((1000, "千"), (100, "百"), (10, "十"), (1, "")):
+        d = (g // pos) % 10
+        if d == 0:
+            continue
+        s += (unit if (unit and d == 1) else _KANJI_DIGITS[d] + unit)
+    return s
+
+
+def _int_to_kanji(n: int) -> str:
+    if n == 0:
+        return "〇"
+    groups = []
+    while n > 0:
+        groups.append(n % 10000)
+        n //= 10000
+    if len(groups) > len(_BIG_UNITS):  # too large for cardinal units
+        return None
+    parts = [
+        _four_digits_to_kanji(g) + _BIG_UNITS[i]
+        for i, g in enumerate(groups)
+        if g != 0
+    ]
+    return "".join(reversed(parts))
+
+
+def _digits_to_kanji(run: str) -> str:
+    """Convert a digit run to kanji. Cardinal for ordinary numbers; digit-by-
+    digit for IDs/phone-like runs (leading zero or very long)."""
+    if run[0] == "0" or len(run) >= 8:
+        return "".join(_KANJI_DIGITS[int(c)] for c in run)
+    kanji = _int_to_kanji(int(run))
+    return kanji if kanji is not None else "".join(_KANJI_DIGITS[int(c)] for c in run)
+
+
+def expand_numbers(text: str) -> str:
+    """Rewrite Arabic/full-width digit runs as kanji numerals."""
+    text = text.translate(_FULLWIDTH_DIGITS)
+    return _DIGIT_RUN_RE.sub(lambda m: _digits_to_kanji(m.group()), text)
 
 
 # ============================================================================
@@ -74,11 +126,14 @@ def _is_kana_char(ch: str) -> bool:
 def text_to_kana(text: str) -> str:
     """Convert a transcription to a normalised **katakana** target string.
 
-    Reading conversion is done by :func:`to_katakana` (analyzer-backed). We keep
+    Digit runs are first rewritten as kanji numerals (:func:`expand_numbers`)
+    so the analyzer reads them to kana instead of dropping them; reading
+    conversion is then done by :func:`to_katakana` (analyzer-backed). We keep
     only kana characters so the CTC vocabulary stays tiny and consistent with
     the hotword filter, which also normalises readings to katakana.
     """
     text = _LATIN_PUNCT_RE.sub("", text)
+    text = expand_numbers(text)
     kana = to_katakana(text)  # katakana, whitespace-free
     return "".join(ch for ch in kana if _is_kana_char(ch))
 
@@ -121,14 +176,40 @@ def build_vocab(dataset: Dataset, cfg: Dict[str, Any]) -> str:
 # ============================================================================
 # Custom model: Whisper encoder + CTC head
 # ============================================================================
+# Written next to every checkpoint so it can be rebuilt without the config
+# (also read by src/models/encoder.py to use the encoder in the LLM model).
+from src.models.encoder import WHISPER_CTC_CONFIG  # noqa: E402
+
+
+def blank_padded_frames(
+    logits: torch.Tensor, lengths: torch.Tensor, blank_id: int
+) -> torch.Tensor:
+    """Force frames at or beyond each utterance's valid length to predict blank.
+
+    Whisper always encodes a 30 s window, so a 3 s clip has ~1350 padded frames.
+    CTC loss never sees them, so their argmax is arbitrary and greedy decoding
+    over all 1500 frames appends garbage characters (CER > 100%). Masking them
+    to blank makes the logits safe for any downstream greedy decoder.
+    """
+    T = logits.size(1)
+    pad = torch.arange(T, device=logits.device)[None, :] >= lengths[:, None]  # (B, T)
+    if not pad.any():
+        return logits
+    blank_row = torch.full_like(logits[:1, :1], torch.finfo(logits.dtype).min)
+    blank_row[..., blank_id] = 0
+    return torch.where(pad[..., None], blank_row, logits)
+
+
 class WhisperEncoderForCTC(nn.Module):
     """Whisper encoder tower with a linear CTC head.
 
     Forward accepts ``input_features`` (log-mel, ``(B, n_mels, 3000)``), an
-    optional mel-frame ``attention_mask`` (used only to compute CTC input
-    lengths), and ``labels`` padded with ``-100``. Returns a
+    optional mel-frame ``attention_mask`` (used to compute CTC input lengths),
+    and ``labels`` padded with ``-100``. Returns a
     :class:`~transformers.modeling_outputs.CausalLMOutput` so it drops straight
-    into a HF :class:`~transformers.Trainer`.
+    into a HF :class:`~transformers.Trainer`. When ``attention_mask`` is given,
+    the returned logits of padded frames are forced to blank
+    (:func:`blank_padded_frames`); the loss is unaffected.
     """
 
     def __init__(
@@ -141,6 +222,7 @@ class WhisperEncoderForCTC(nn.Module):
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
+        self.whisper_id = whisper_id
         base = WhisperModel.from_pretrained(whisper_id)
         self.encoder = base.get_encoder()
         del base  # free the unused decoder
@@ -173,10 +255,11 @@ class WhisperEncoderForCTC(nn.Module):
         hidden = self.dropout(hidden)
         logits = self.lm_head(hidden)  # (B, T, V)
 
+        B, T = logits.size(0), logits.size(1)
+        input_lengths = self._output_lengths(attention_mask, B, T, logits.device)
+
         loss = None
         if labels is not None:
-            B, T = logits.size(0), logits.size(1)
-            input_lengths = self._output_lengths(attention_mask, B, T, logits.device)
             labels_mask = labels >= 0
             target_lengths = labels_mask.sum(-1)
             flat_targets = labels.masked_select(labels_mask)
@@ -193,7 +276,79 @@ class WhisperEncoderForCTC(nn.Module):
                     reduction=self.ctc_loss_reduction,
                     zero_infinity=self.ctc_zero_infinity,
                 )
+        if attention_mask is not None:
+            logits = blank_padded_frames(logits, input_lengths, self.pad_token_id)
         return CausalLMOutput(loss=loss, logits=logits)
+
+    def save_metadata(self, save_dir: str) -> None:
+        """Write what :func:`load_whisper_ctc` needs to rebuild this model."""
+        os.makedirs(save_dir, exist_ok=True)
+        meta = {
+            "whisper_id": self.whisper_id,
+            "vocab_size": self.vocab_size,
+            "pad_token_id": self.pad_token_id,
+            "ctc_loss_reduction": self.ctc_loss_reduction,
+            "ctc_zero_infinity": self.ctc_zero_infinity,
+        }
+        with open(os.path.join(save_dir, WHISPER_CTC_CONFIG), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+
+def load_whisper_ctc(
+    model_dir: str,
+    vocab_path: Optional[str] = None,
+    whisper_id: Optional[str] = None,
+):
+    """Load a trained :class:`WhisperEncoderForCTC` from a ``final/`` or
+    ``checkpoint-*`` directory.
+
+    ``WhisperEncoderForCTC`` is not a ``PreTrainedModel`` (no ``config.json``),
+    so ``AutoModelForCTC`` cannot load it. Metadata comes from
+    ``whisper_ctc_config.json`` when present; older checkpoints lack it, in
+    which case pass ``whisper_id`` (e.g. ``openai/whisper-medium``). The vocab
+    is looked up in *model_dir* then its parent (the experiment dir).
+
+    Returns ``(model, tokenizer, feature_extractor)``.
+    """
+    model_dir = Path(model_dir)
+    meta_path = model_dir / WHISPER_CTC_CONFIG
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    whisper_id = whisper_id or meta.get("whisper_id")
+    if not whisper_id:
+        raise ValueError(
+            f"{meta_path} not found: pass the base Whisper model id "
+            "(e.g. --base-model openai/whisper-medium)."
+        )
+
+    if vocab_path is None:
+        candidates = [model_dir / "vocab.json", model_dir.parent / "vocab.json"]
+        vocab_path = next((str(c) for c in candidates if c.exists()), None)
+        if vocab_path is None:
+            raise FileNotFoundError(f"vocab.json not found in {model_dir} or its parent")
+    tokenizer = Wav2Vec2CTCTokenizer(
+        vocab_path, unk_token="<unk>", pad_token="<pad>", word_delimiter_token="|"
+    )
+
+    weights = model_dir / "model.safetensors"
+    if weights.exists():
+        from safetensors.torch import load_file
+
+        state = load_file(str(weights))
+    else:
+        state = torch.load(model_dir / "pytorch_model.bin", map_location="cpu")
+
+    model = WhisperEncoderForCTC(
+        whisper_id,
+        vocab_size=state["lm_head.weight"].shape[0],
+        pad_token_id=tokenizer.pad_token_id,
+        ctc_loss_reduction=meta.get("ctc_loss_reduction", "mean"),
+        ctc_zero_infinity=meta.get("ctc_zero_infinity", True),
+    )
+    model.load_state_dict(state)
+
+    fe_source = model_dir if (model_dir / "preprocessor_config.json").exists() else whisper_id
+    feature_extractor = WhisperFeatureExtractor.from_pretrained(fe_source)
+    return model, tokenizer, feature_extractor
 
 
 # ============================================================================
@@ -225,6 +380,7 @@ class WhisperCTCDataset(Dataset):
             "input_features": feats.input_features[0],
             "attention_mask": feats.attention_mask[0],
             "labels": labels,
+            "kana": kana,
         }
 
 
@@ -304,6 +460,20 @@ class UnfreezeCallback(TrainerCallback):
         total = sum(p.numel() for p in model.parameters())
         logger.info(f"  Trainable: {trainable:,} / {total:,}")
         self._done = True
+
+
+class SaveMetadataCallback(TrainerCallback):
+    """Make every ``checkpoint-*`` self-contained (metadata + vocab) so it can
+    be loaded by :func:`load_whisper_ctc` / ``decode_ctc.py`` directly."""
+
+    def __init__(self, tokenizer: Wav2Vec2CTCTokenizer) -> None:
+        self.tokenizer = tokenizer
+
+    def on_save(self, args, state, control, model=None, **kw):
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        if hasattr(model, "save_metadata") and os.path.isdir(ckpt_dir):
+            model.save_metadata(ckpt_dir)
+            self.tokenizer.save_pretrained(ckpt_dir)
 
 
 # ============================================================================
@@ -465,7 +635,10 @@ def train(cfg: Dict[str, Any], checkpoint: Optional[str] = None) -> None:
         processing_class=feature_extractor,
         compute_metrics=make_compute_metrics(tokenizer),
         optimizers=(optimizer, scheduler),
-        callbacks=[UnfreezeCallback(cfg["freeze"]["unfreeze_step"])],
+        callbacks=[
+            UnfreezeCallback(cfg["freeze"]["unfreeze_step"]),
+            SaveMetadataCallback(tokenizer),
+        ],
     )
 
     logger.info("Starting training …")
@@ -473,6 +646,7 @@ def train(cfg: Dict[str, Any], checkpoint: Optional[str] = None) -> None:
 
     final_dir = os.path.join(out_dir, "final")
     trainer.save_model(final_dir)
+    model.save_metadata(final_dir)
     feature_extractor.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
     logger.info(f"Final model saved to {final_dir}")

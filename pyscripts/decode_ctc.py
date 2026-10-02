@@ -1,5 +1,7 @@
 """
-Decode LibriSpeech test sets using the finetuned WavLM-CTC model.
+Decode test sets (LibriSpeech or CSJ) with a CTC model: a finetuned WavLM-CTC,
+any HF ``AutoModelForCTC`` checkpoint, or our Whisper-encoder kana CTC
+(``src/finetune/whisper_ft_ctc.py``).
 
 Produces a CTC pseudo-label file (TSV format):
     utt_id\tctc_decoded_text
@@ -13,6 +15,14 @@ Usage:
         --data-dir data/LibriSpeech \
         --output-dir exp/wavlm-ft-ctc-libri/ctc_decode \
         --splits test-clean test-other
+
+    # Japanese (CSJ) with the Whisper kana-CTC model
+    python pyscripts/decode_ctc.py \
+        --wavlm-model exp/whisper-ft-ctc_ja/checkpoint-40000 \
+        --base-model openai/whisper-medium \
+        --data-dir data/csj --language ja \
+        --output-dir exp/whisper-ft-ctc_ja/ctc_decode \
+        --splits eval1_whisper_like_clean eval2_whisper_like_clean eval3_whisper_like_clean
 
 """
 
@@ -37,9 +47,8 @@ from transformers import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.dataset.librispeech_dataset import LibriSpeechDataset
-from src.utils.dataset_utils import to_cuda
-from src.utils.compute_wer import compute_wer
+from src.dataset.factory import DATASET_TYPES, build_dataset
+from src.utils.compute_wer import compute_cer, score_transcripts
 from src.utils.config_utils import setup_logging, log_separator
 from src.utils.inference_utils import save_ctc_file
 
@@ -115,8 +124,13 @@ def load_model_from_pt(
 # ---------------------------------------------------------------------------
 # Collate function for CTC decoding
 # ---------------------------------------------------------------------------
-def get_ctc_collate_fn(processor: Wav2Vec2Processor, device: str = "cuda"):
-    """Create a collate function that processes audio for WavLM-CTC."""
+def get_ctc_collate_fn(processor, device: str = "cuda", whisper: bool = False):
+    """Create a collate function that featurises audio for the CTC model.
+
+    ``processor`` is a Wav2Vec2-style processor (waveform ``input_values``) or,
+    with ``whisper=True``, a ``WhisperFeatureExtractor`` (log-mel
+    ``input_features`` padded to 30 s + a mel-frame attention mask).
+    """
 
     def collate_fn(batch):
         audios = [sample["audio"] for sample in batch]
@@ -125,14 +139,15 @@ def get_ctc_collate_fn(processor: Wav2Vec2Processor, device: str = "cuda"):
             sampling_rate=16000,
             return_tensors="pt",
             return_attention_mask=True,
-            padding=True,
+            **({} if whisper else {"padding": True}),
         )
+        key = "input_features" if whisper else "input_values"
+        model_inputs = {key: inputs[key], "attention_mask": inputs["attention_mask"]}
         if device == "cuda":
-            inputs = inputs.to(device)
+            model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
 
         return {
-            "input_values": inputs.input_values,
-            "attention_mask": inputs.attention_mask,
+            "model_inputs": model_inputs,
             "utterance_id": [sample.get("utterance_id", "") for sample in batch],
             "transcription": [sample["transcription"] for sample in batch],
         }
@@ -143,13 +158,13 @@ def get_ctc_collate_fn(processor: Wav2Vec2Processor, device: str = "cuda"):
 # ---------------------------------------------------------------------------
 # CTC greedy decode (character-level)
 # ---------------------------------------------------------------------------
-def ctc_greedy_decode(logits: torch.Tensor, processor: Wav2Vec2Processor) -> List[str]:
+def ctc_greedy_decode(logits: torch.Tensor, processor) -> List[str]:
     """
     Greedy CTC decoding using the processor's vocabulary.
 
     Args:
         logits: (batch, seq_len, vocab_size) from WavLMForCTC
-        processor: Wav2Vec2Processor with tokenizer
+        processor: Wav2Vec2Processor or CTC tokenizer (anything with batch_decode)
 
     Returns:
         List of decoded strings
@@ -162,26 +177,52 @@ def ctc_greedy_decode(logits: torch.Tensor, processor: Wav2Vec2Processor) -> Lis
 # ---------------------------------------------------------------------------
 # Decode a full split
 # ---------------------------------------------------------------------------
+def kana_cer(hyps: List[str], refs: List[str]) -> float:
+    """CER on katakana readings, so kana-only hypotheses (Whisper kana-CTC) are
+    scored fairly against kanji+kana references. Needs a reading backend."""
+    from src.finetune.whisper_ft_ctc import text_to_kana
+    from src.utils.japanese import is_kana, normalize_reading
+
+    def _hyp_kana(h: str) -> str:
+        # Already kana: only normalise (re-analysing unsegmented kana can
+        # change it); otherwise read kanji to kana like the reference.
+        return normalize_reading(h) if is_kana(h) else text_to_kana(h)
+
+    return compute_cer([_hyp_kana(h) for h in hyps], [text_to_kana(r) for r in refs])
+
+
 @torch.no_grad()
 def decode_split(
-    model: WavLMForCTC,
-    processor: Wav2Vec2Processor,
+    model,
+    processor,
     data_dir: str,
     split: str,
     batch_size: int = 8,
     num_workers: int = 4,
     data_device: str = "cuda",
-) -> Tuple[Dict[str, str], float, int]:
+    dataset_type: str = "auto",
+    language: str = "en",
+    feature_processor=None,
+) -> Tuple[Dict[str, str], Dict[str, float], int]:
     """
-    Decode all utterances in a LibriSpeech split.
+    Decode all utterances in a split.
+
+    ``processor`` decodes ids (``batch_decode``); ``feature_processor`` (if
+    given) featurises audio — set for Whisper-CTC, where they differ.
 
     Returns:
-        (results, wer, num_samples) where results maps utt_id -> CTC decoded text
+        (results, metrics, num_samples) where results maps utt_id -> CTC text
+        and metrics is ``{"wer": ...}`` (en) or
+        ``{"cer_surface": ..., "cer_kana": ...}`` (ja)
     """
-    dataset = LibriSpeechDataset(data_path=data_dir, split=split)
+    dataset = build_dataset(data_dir, split, dataset_type, max_samples=0)
     logger.info(f"Loaded {len(dataset)} samples from {split}")
 
-    collate_fn = get_ctc_collate_fn(processor, device=data_device)
+    collate_fn = get_ctc_collate_fn(
+        feature_processor or processor,
+        device=data_device,
+        whisper=feature_processor is not None,
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -197,12 +238,8 @@ def decode_split(
     refs = []
 
     for batch in tqdm(dataloader, desc=f"CTC decode [{split}]"):
-        if data_device != "cuda":
-            batch = to_cuda(batch)
-        logits = model(
-            input_values=batch["input_values"],
-            attention_mask=batch["attention_mask"],
-        ).logits
+        model_inputs = {k: v.to("cuda") for k, v in batch["model_inputs"].items()}
+        logits = model(**model_inputs).logits
 
         decoded_texts = ctc_greedy_decode(logits, processor)
 
@@ -213,9 +250,34 @@ def decode_split(
             hyps.append(text.lower())
             refs.append(ref.lower())
             logger.debug(f"  {uid}: CTC='{text}' | REF='{ref}'")
-    wer = compute_wer(hyps, refs)
-    logger.info(f"CTC decode WER for {split}: {wer}")
-    return results, wer, len(dataset)
+
+    metric, error_rate, _, _ = score_transcripts(hyps, refs, language=language)
+    if language == "ja":
+        # Surface CER is only meaningful for kanji+kana models; a kana-only CTC
+        # model is judged by cer_kana (its surface CER is >100% by design).
+        metrics = {"cer_surface": error_rate}
+        from src.utils.japanese import has_reading_backend
+
+        if has_reading_backend():
+            metrics["cer_kana"] = kana_cer(hyps, refs)
+        else:
+            logger.warning("No reading backend: skipping kana CER")
+    else:
+        metrics = {metric: error_rate}
+    logger.info(f"CTC decode metrics for {split}: {metrics}")
+    return results, metrics, len(dataset)
+
+
+def resolve_ctc_type(model_path: str, ctc_type: str = "auto") -> str:
+    """``whisper`` for our Whisper-encoder CTC dirs (weights, no config.json)."""
+    if ctc_type != "auto":
+        return ctc_type
+    p = Path(model_path)
+    if p.is_dir() and not (p / "config.json").exists() and (
+        (p / "whisper_ctc_config.json").exists() or (p / "model.safetensors").exists()
+    ):
+        return "whisper"
+    return "hf"
 
 
 # ---------------------------------------------------------------------------
@@ -223,13 +285,26 @@ def decode_split(
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Decode LibriSpeech using finetuned WavLM-CTC"
+        description="Decode a dataset (LibriSpeech / CSJ) with a CTC model"
     )
     parser.add_argument(
         "--wavlm-model",
         type=str,
         default="exp/wavlm-ft-libri_2/final",
-        help="Path to finetuned WavLM-CTC model directory or .pt checkpoint",
+        help=(
+            "CTC model: HF model dir/hub id, .pt checkpoint, or a Whisper-CTC "
+            "final/checkpoint-* dir"
+        ),
+    )
+    parser.add_argument(
+        "--ctc-type",
+        type=str,
+        choices=["auto", "hf", "whisper"],
+        default="auto",
+        help=(
+            "hf = AutoModelForCTC; whisper = Whisper-encoder kana CTC "
+            "(auto: whisper if the dir has model weights but no config.json)"
+        ),
     )
     parser.add_argument(
         "--vocab-path",
@@ -241,13 +316,31 @@ def parse_args():
         "--base-model",
         type=str,
         default="microsoft/wavlm-large",
-        help="Base HuggingFace model ID (used when --wavlm-model is a .pt file)",
+        help=(
+            "Base HuggingFace model ID (used when --wavlm-model is a .pt file, or "
+            "a Whisper-CTC checkpoint without whisper_ctc_config.json, e.g. "
+            "openai/whisper-medium)"
+        ),
     )
     parser.add_argument(
         "--data-dir",
         type=str,
         default="data/LibriSpeech",
-        help="Root directory of LibriSpeech data",
+        help="Dataset root: LibriSpeech dir, or CSJ dump/raw dir",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=list(DATASET_TYPES),
+        default="auto",
+        help="Dataset layout: librispeech, csj (Kaldi text/wav.scp), or auto-detect",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        choices=["en", "ja"],
+        default="en",
+        help="Scoring: en = WER, ja = CER (+ kana-reading CER)",
     )
     parser.add_argument(
         "--output-dir",
@@ -260,7 +353,7 @@ def parse_args():
         type=str,
         nargs="+",
         default=["test-clean", "test-other"],
-        help="LibriSpeech splits to decode",
+        help="Splits to decode",
     )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -279,7 +372,17 @@ def main():
 
     # Load model
     logger.info(f"Loading CTC model from {args.wavlm_model}")
-    if args.wavlm_model.endswith(".pt"):
+    feature_processor = None
+    if resolve_ctc_type(args.wavlm_model, args.ctc_type) == "whisper":
+        from src.finetune.whisper_ft_ctc import load_whisper_ctc
+
+        # --base-model defaults to WavLM; only use it if it names a Whisper model.
+        whisper_id = args.base_model if "whisper" in args.base_model else None
+        model, processor, feature_processor = load_whisper_ctc(
+            args.wavlm_model, vocab_path=args.vocab_path, whisper_id=whisper_id
+        )
+        model = model.to("cuda")
+    elif args.wavlm_model.endswith(".pt"):
         if not args.vocab_path:
             raise ValueError("--vocab-path is required when using a .pt checkpoint")
         model, processor = load_model_from_pt(
@@ -293,10 +396,9 @@ def main():
         processor = AutoProcessor.from_pretrained(args.wavlm_model)
     model.eval()
 
-    logger.info(
-        f"Model loaded. Vocab size: {model.config.vocab_size}, "
-        f"Hidden size: {model.config.hidden_size}"
-    )
+    hidden = getattr(model.config, "hidden_size", getattr(model.config, "d_model", "?"))
+    tokenizer = getattr(processor, "tokenizer", processor)
+    logger.info(f"Model loaded. CTC vocab size: {len(tokenizer)}, Hidden size: {hidden}")
 
     # Decode each split
     os.makedirs(args.output_dir, exist_ok=True)
@@ -307,7 +409,7 @@ def main():
         log_separator()
         logger.info(f"Decoding split: {split}")
 
-        results, wer, num_samples = decode_split(
+        results, metrics, num_samples = decode_split(
             model=model,
             processor=processor,
             data_dir=args.data_dir,
@@ -315,11 +417,14 @@ def main():
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             data_device=str(data_device),
+            dataset_type=args.dataset,
+            language=args.language,
+            feature_processor=feature_processor,
         )
 
         out_path = os.path.join(args.output_dir, f"{split}_ctc.tsv")
         save_ctc_file(results, out_path)
-        summary[split] = {"wer": wer, "num_samples": num_samples}
+        summary[split] = {**metrics, "num_samples": num_samples}
 
         logger.info(f"  Decoded {len(results)} utterances -> {out_path}")
 

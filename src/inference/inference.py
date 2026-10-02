@@ -26,12 +26,12 @@ from whisper.normalizers import BasicTextNormalizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.models.model import CTCAssistedLLMASR
-from src.dataset.librispeech_dataset import LibriSpeechDataset
-from src.utils.create_prompt import create_prompt_with_hotwords
+from src.dataset.factory import DATASET_TYPES, build_dataset
+from src.utils.create_prompt import create_prompt_with_hotwords, detect_prompt_format
 from src.utils.dataset_utils import load_audio
 from src.utils.config_utils import load_config, setup_logging, set_seed, log_separator
 from src.utils.train_utils import load_checkpoint
-from src.utils.compute_wer import compute_wer
+from src.utils.compute_wer import score_transcripts
 from src.utils.inference_utils import load_bias_lists, load_ctc_files, save_results
 
 if TYPE_CHECKING:
@@ -73,9 +73,11 @@ def get_nobias_collate_fn(
 ):
     """
     Collate for nobias mode: no hotwords in prompt.
-    Prompt: "USER: Transcribe speech to text.\\n ASSISTANT:"
+    Prompt (Vicuna): "USER: Transcribe speech to text.\\n ASSISTANT:"
     """
-    prompt_text = create_prompt_with_hotwords([], language=language)
+    prompt_text = create_prompt_with_hotwords(
+        [], language=language, prompt_format=detect_prompt_format(decoder_processor)
+    )
     move_to = device if device == "cuda" else None
 
     def collate_fn(batch):
@@ -119,6 +121,7 @@ def get_gt_collate_fn(
     (Japanese) the prompt annotates each hotword as ``橋（ハシ）``.
     """
     move_to = device if device == "cuda" else None
+    prompt_format = detect_prompt_format(decoder_processor)
 
     def collate_fn(batch):
         encoder_inputs = encoder.process_audio(
@@ -132,7 +135,12 @@ def get_gt_collate_fn(
             hw = bias_data[uid]["true_hotwords"] if uid in bias_data else []
             readings = [reading_fn(w) for w in hw] if reading_fn else None
             prompts.append(
-                create_prompt_with_hotwords(hw, language=language, readings=readings)
+                create_prompt_with_hotwords(
+                    hw,
+                    language=language,
+                    readings=readings,
+                    prompt_format=prompt_format,
+                )
             )
 
         prompt_inputs = decoder_processor(
@@ -176,6 +184,7 @@ def get_filter_collate_fn(
     use_readings = language == "ja" and hasattr(
         hotword_filter, "filter_hotwords_with_readings"
     )
+    prompt_format = detect_prompt_format(decoder_processor)
 
     def collate_fn(batch):
         encoder_inputs = encoder.process_audio(
@@ -204,7 +213,10 @@ def get_filter_collate_fn(
 
             prompts.append(
                 create_prompt_with_hotwords(
-                    filtered_hw, language=language, readings=readings
+                    filtered_hw,
+                    language=language,
+                    readings=readings,
+                    prompt_format=prompt_format,
                 )
             )
 
@@ -239,11 +251,14 @@ def evaluate_dataset(
     num_beams: int = 4,
     do_sample: bool = False,
     data_device: str = "cuda",
+    language: str = "en",
 ) -> Dict[str, Any]:
-    """Run inference over a DataLoader and compute WER.
+    """Run inference over a DataLoader and score it (WER for en, CER for ja).
 
     Returns a dict with:
-        wer       – float, overall WER
+        metric    – "wer" or "cer"
+        wer       – float, error rate under ``metric`` (key kept for
+                    backward compatibility; it is the CER for Japanese)
         hyps      – list[str], normalised hypotheses
         refs      – list[str], normalised references
         raw_hyps  – list[str], raw hypotheses (before normalisation)
@@ -292,14 +307,14 @@ def evaluate_dataset(
             logger.debug(f"HYP: {hyp}")
             logger.debug(f"REF: {ref}")
 
-    # Normalise
-    hyps = [normalizer(h.strip()) for h in raw_hyps]
-    refs = [normalizer(r.strip()) for r in raw_refs]
-
-    wer_score = compute_wer(hyps, refs) if hyps and refs else 0.0
+    # Normalise + score (raises on an empty dataset instead of reporting 0%)
+    metric, error_rate, hyps, refs = score_transcripts(
+        raw_hyps, raw_refs, language=language, normalizer=normalizer
+    )
 
     return {
-        "wer": wer_score,
+        "metric": metric,
+        "wer": error_rate,
         "hyps": hyps,
         "refs": refs,
         "raw_hyps": raw_hyps,
@@ -329,7 +344,9 @@ def transcribe_single(
         [audio.squeeze(0).cpu().numpy()], device=str(device)
     )
 
-    prompt = create_prompt_with_hotwords(hotwords or [], language=language)
+    prompt = create_prompt_with_hotwords(
+        hotwords or [], language=language, prompt_format=model.prompt_format
+    )
     prompt_inputs = model.decoder_processor(
         prompt, return_tensors="pt", padding=True
     ).to(device)
@@ -362,7 +379,7 @@ def parse_args():
         "--mode",
         choices=["eval", "transcribe"],
         default="eval",
-        help="'eval' – evaluate on LibriSpeech test splits. 'transcribe' – single file.",
+        help="'eval' – evaluate on dataset test splits. 'transcribe' – single file.",
     )
     parser.add_argument(
         "--infer-type",
@@ -399,7 +416,14 @@ def parse_args():
         "--data-dir",
         type=str,
         default="data/LibriSpeech",
-        help="Root directory of LibriSpeech data (for eval mode)",
+        help="Dataset root: LibriSpeech dir, or CSJ dump/raw dir (for eval mode)",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=list(DATASET_TYPES),
+        default="auto",
+        help="Dataset layout: librispeech, csj (Kaldi text/wav.scp), or auto-detect",
     )
     parser.add_argument(
         "--output-dir",
@@ -420,7 +444,7 @@ def parse_args():
         type=str,
         nargs="+",
         default=["test-clean", "test-other"],
-        help="LibriSpeech splits to evaluate",
+        help="Splits to evaluate (e.g. test-clean, or eval1_whisper_like_clean for CSJ)",
     )
 
     # --- model ---
@@ -714,7 +738,7 @@ def main():
         return
 
     # ------------------------------------------------------------------
-    # Eval mode – evaluate on LibriSpeech test splits
+    # Eval mode – evaluate on dataset test splits
     # ------------------------------------------------------------------
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
@@ -731,8 +755,9 @@ def main():
         log_separator()
         logger.info(f"Evaluating: split={split}, infer_type={args.infer_type}")
 
-        dataset = LibriSpeechDataset(
-            data_path=str(data_dir), split=split, config=data_cfg
+        # max_samples=0: score every test utterance (no 30 s length filter).
+        dataset = build_dataset(
+            str(data_dir), split, args.dataset, config=data_cfg, max_samples=0
         )
         logger.info(f"Loaded {len(dataset)} samples from {split}")
 
@@ -788,14 +813,16 @@ def main():
             num_beams=num_beams,
             do_sample=args.do_sample,
             data_device=args.data_device,
+            language=language,
         )
+        metric = results["metric"]
 
         split_wers[split] = results["wer"]
         overall_hyps.extend(results["hyps"])
         overall_refs.extend(results["refs"])
 
         logger.info(
-            f"[{split}] WER = {results['wer']*100:.2f}%  "
+            f"[{split}] {metric.upper()} = {results['wer']*100:.2f}%  "
             f"({len(results['hyps'])} utterances)"
         )
 
@@ -806,15 +833,18 @@ def main():
 
     # Overall WER (if multiple splits)
     if len(args.splits) > 1:
-        overall_wer = compute_wer(overall_hyps, overall_refs)
+        # hyps/refs are already normalised; the identity normaliser just re-scores
+        _, overall_wer, _, _ = score_transcripts(
+            overall_hyps, overall_refs, language=language
+        )
         split_wers["overall"] = overall_wer
-        logger.info(f"\nOverall WER = {overall_wer*100:.2f}%")
+        logger.info(f"\nOverall {metric.upper()} = {overall_wer*100:.2f}%")
 
     # Print summary
     log_separator()
     logger.info(f"INFERENCE RESULTS  (infer_type={args.infer_type})")
     for split, w in split_wers.items():
-        logger.info(f"  {split:20s}  WER = {w*100:.2f}%")
+        logger.info(f"  {split:20s}  {metric.upper()} = {w*100:.2f}%")
     logger.info(f"  {'time':20s}  {elapsed:.1f}s ({elapsed/60:.1f}min)")
 
     # Save global summary
@@ -825,6 +855,9 @@ def main():
                 "checkpoint": str(ckpt_path),
                 "infer_type": args.infer_type,
                 "splits": args.splits,
+                "language": language,
+                "metric": metric,
+                # key kept as "wer" for existing tooling; holds CER when metric == "cer"
                 "wer": split_wers,
                 "num_samples": len(overall_hyps),
                 "elapsed_seconds": elapsed,

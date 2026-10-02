@@ -36,7 +36,11 @@ EXP_DIR="${EXP_DIR:-/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libr
 # EXP_DIR="${EXP_DIR:-/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual}"
 
 
-CHECKPOINT="${CHECKPOINT:-${EXP_DIR}/checkpoints/best_wer_model.pt}"
+# Prompt/filter language: "en" (WER) or "ja" (CER)
+LANGUAGE="${LANGUAGE:-en}"
+if [ "$LANGUAGE" = "ja" ]; then METRIC=cer; else METRIC=wer; fi
+
+CHECKPOINT="${CHECKPOINT:-${EXP_DIR}/checkpoints/best_${METRIC}_model.pt}"
 CONFIG="${CONFIG:-${EXP_DIR}/training_config.yaml}"
 INFER_CONFIG="${INFER_CONFIG:-config/inference.yaml}"
 SPLITS="${SPLITS:-test-clean test-other}"
@@ -83,6 +87,7 @@ echo "================================================================"
 echo "  CTC-assisted LLM ASR – Run All Inference Modes"
 echo "================================================================"
 echo "Checkpoint:      $CHECKPOINT"
+echo "Language:        $LANGUAGE (${METRIC^^})"
 echo "Splits:          $SPLITS"
 echo "Infer modes:     $INFER_MODES"
 echo "Filter methods:  $FILTER_METHODS"
@@ -133,7 +138,8 @@ run_infer() {
         --num-beams $NUM_BEAMS \
         --max-new-tokens $MAX_NEW_TOKENS \
         --num-workers $num_workers \
-        --data-device $DATA_DEVICE"
+        --data-device $DATA_DEVICE \
+        --language $LANGUAGE"
 
     # Add bias list for gt / filter
     if [ "$infer_type" = "gt" ] || [ "$infer_type" = "filter" ]; then
@@ -238,8 +244,9 @@ for dir_suffix in $ALL_RESULT_DIRS; do
 import json, sys
 d = json.load(sys.stdin)
 wers = d.get('wer', {})
+metric = d.get('metric', 'wer').upper()
 parts = [f'{k}={v*100:.2f}%' for k,v in wers.items()]
-print(', '.join(parts))
+print(metric + ': ' + ', '.join(parts))
 " 2>/dev/null || echo "see ${summary}")"
     else
         echo "  ${dir_suffix}:  (skipped)"

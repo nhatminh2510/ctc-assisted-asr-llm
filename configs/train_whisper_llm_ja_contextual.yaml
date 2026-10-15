@@ -11,9 +11,8 @@ model:
   # encoder. large-v3 = d_model 1280, medium = 1024, small = 768, base = 512.
   # Kana-CTC fine-tuned Whisper encoder (src/finetune/whisper_ft_ctc.py); the
   # dir's whisper_ctc_config.json names the base model (openai/whisper-medium).
-  # checkpoint-40000: lowest dev CTC loss of the saved checkpoints (70000 overfits).
   # Use openai/whisper-medium here for the raw, non-fine-tuned encoder.
-  encoder_path: /home/25/minh/ctc-assisted-asr-llm/exp/whisper-ft-ctc_ja/checkpoint-40000
+  encoder_path: /home/25/minh/ctc-assisted-asr-llm/exp/whisper-ft-ctc_ja/final
   encoder_type: whisper              # "auto" also detects Whisper from the config
   # Use a Japanese-capable causal LLM as the decoder, e.g.
   #   tokyotech-llm/Swallow-7b-instruct-hf, elyza/ELYZA-japanese-Llama-2-7b, ...

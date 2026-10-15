@@ -1,67 +1,88 @@
 #!/bin/bash
 # =============================================================================
-# Run ALL inference modes (nobias, gt, filter-F1, filter-F2, filter-F3).
+# Run ALL inference modes (nobias, gt, filter-<method>).
+#
+# Defaults target Japanese (CSJ eval1/2/3, CER, "ja" reading-based filter).
+# Set LANGUAGE=en to get the LibriSpeech defaults back.
 #
 # Prerequisites:
-#   1. bash decode-ctc.sh      → produces data/ctc_decode/*_ctc.tsv
-#   2. bash make-bias-list.sh  → produces data/hotwords/*_bias_list.json
+#   1. bash decode-ctc.sh      → produces <CTC_DIR>/<split>_ctc.tsv
+#   2. bash make-bias-list.sh  → produces <HOTWORDS_DIR>/<split>_bias_list.json
 #
 # Usage:
-#   bash run-all-infer.sh                           # run all modes + all filter methods
+#   bash run-all-infer.sh                           # Japanese: nobias, gt, filter-ja
 #
 #   # Run only specific modes
 #   INFER_MODES="nobias filter" bash run-all-infer.sh
 #
-#   # Run only specific filter methods
-#   FILTER_METHODS="F3" bash run-all-infer.sh
-#
 #   # Custom settings
-#   SPLITS="test-clean" bash run-all-infer.sh
+#   SPLITS="eval1_whisper_like_clean" bash run-all-infer.sh
 #   EXP_DIR=exp/my_experiment bash run-all-infer.sh
+#
+#   # English (LibriSpeech, WER, F1/F2/F3 filters)
+#   LANGUAGE=en bash run-all-infer.sh
+#   LANGUAGE=en FILTER_METHODS="F3" bash run-all-infer.sh
 # =============================================================================
 
 set -e
 export HF_HOME=/home-local/minh/myhome/.cache/huggingface
 export CUDA_VISIBLE_DEVICES=0,1
-USE_DEVICE=1
+# CUDA order is FASTEST_FIRST: 0 = RTX 4000 Ada (20 GB), 1 = RTX 3090
+USE_DEVICE="${USE_DEVICE:-0}"
+
+ROOT_DIR=/home/25/minh/ctc-assisted-asr-llm
+cd "$ROOT_DIR"
 
 # ---------------------------------------------------------------------------
 # Shared configuration
 # ---------------------------------------------------------------------------
-DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech}"
+# Prompt/filter language: "ja" (CER) or "en" (WER)
+LANGUAGE="${LANGUAGE:-ja}"
+
+if [ "$LANGUAGE" = "ja" ]; then
+    METRIC=cer
+    DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data/csj}"
+    EXP_DIR="${EXP_DIR:-${ROOT_DIR}/exp/whisper-ft-ctc_llm_contextual}"
+    INFER_CONFIG="${INFER_CONFIG:-${ROOT_DIR}/configs/inference_ja.yaml}"
+    SPLITS="${SPLITS:-eval1_whisper_like_clean eval2_whisper_like_clean eval3_whisper_like_clean}"
+    HOTWORDS_DIR="${HOTWORDS_DIR:-${ROOT_DIR}/data/lexicon/csj/hotwords}"
+    CTC_DIR="${CTC_DIR:-${ROOT_DIR}/exp/whisper-ft-ctc_ja/ctc_decode}"
+    COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-${ROOT_DIR}/data/lexicon/csj/common_words_5k.txt}"
+    FILTER_METHODS="${FILTER_METHODS:-ja}"
+    ENCODER_TYPE="${ENCODER_TYPE:-whisper}"
+else
+    METRIC=wer
+    DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data/LibriSpeech}"
+    # EXP_DIR="${EXP_DIR:-${ROOT_DIR}/exp/pt-wavlm_llm_libri_no-contextual}"
+    EXP_DIR="${EXP_DIR:-${ROOT_DIR}/exp/wavlm-ft-ctc_llm_libri_no-contextual}"
+    # EXP_DIR="${EXP_DIR:-${ROOT_DIR}/exp/wavlm-ft-ctc_llm_libri_contextual}"
+    INFER_CONFIG="${INFER_CONFIG:-${ROOT_DIR}/configs/inference.yaml}"
+    SPLITS="${SPLITS:-test-clean test-other}"
+    HOTWORDS_DIR="${HOTWORDS_DIR:-${ROOT_DIR}/data/lexicon/LibriSpeech/bias_list_100}"
+    CTC_DIR="${CTC_DIR:-/home/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_libri/ctc_decode}"
+    COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-${ROOT_DIR}/data/lexicon/LibriSpeech/common_words_5k.txt}"
+    FILTER_METHODS="${FILTER_METHODS:-F1 F2 F3}"
+    ENCODER_TYPE="${ENCODER_TYPE:-auto}"
+fi
+
+# Dataset layout: auto (csj if <split>/wav.scp exists), librispeech, csj
+DATASET="${DATASET:-auto}"
 
 # Experiment directory containing checkpoints/ and training_config.yaml
-# EXP_DIR="${EXP_DIR:-/home/25/minh/ctc-assisted-asr-llm/exp/pt-wavlm_llm_libri_no-contextual}"
-EXP_DIR="${EXP_DIR:-/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_no-contextual}"
-# EXP_DIR="${EXP_DIR:-/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual}"
-
-
-# Prompt/filter language: "en" (WER) or "ja" (CER)
-LANGUAGE="${LANGUAGE:-en}"
-if [ "$LANGUAGE" = "ja" ]; then METRIC=cer; else METRIC=wer; fi
-
 CHECKPOINT="${CHECKPOINT:-${EXP_DIR}/checkpoints/best_${METRIC}_model.pt}"
 CONFIG="${CONFIG:-${EXP_DIR}/training_config.yaml}"
-INFER_CONFIG="${INFER_CONFIG:-config/inference.yaml}"
-SPLITS="${SPLITS:-test-clean test-other}"
 
 BATCH_SIZE="${BATCH_SIZE:-1}"
 NUM_BEAMS="${NUM_BEAMS:-4}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
 DATA_DEVICE="${DATA_DEVICE:-cuda}"
 
-# Bias list / CTC directories
-HOTWORDS_DIR="${HOTWORDS_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon/LibriSpeech/bias_list_100}"
-CTC_DIR="${CTC_DIR:-/home/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_libri/ctc_decode}"
-
 # Filter parameters
-COMMON_WORDS_PATH="${COMMON_WORDS_PATH:-/home/25/minh/ctc-assisted-asr-llm/data/lexicon/LibriSpeech/common_words_5k.txt}"
-PROBABILITY_THRESHOLD="${PROBABILITY_THRESHOLD:-}"   # empty = use method default in inference.yaml
-WORD_NUM="${WORD_NUM:-}"                               # empty = use method default in inference.yaml
+PROBABILITY_THRESHOLD="${PROBABILITY_THRESHOLD:-}"   # empty = use method default in INFER_CONFIG
+WORD_NUM="${WORD_NUM:-}"                               # empty = use method default in INFER_CONFIG
 
-# Inference modes and filter methods (default: run everything)
+# Inference modes (default: run everything)
 INFER_MODES="${INFER_MODES:-nobias gt filter}"
-FILTER_METHODS="${FILTER_METHODS:-F1 F2 F3}"
 
 # ---------------------------------------------------------------------------
 # Auto-build space-separated file lists from SPLITS
@@ -88,6 +109,9 @@ echo "  CTC-assisted LLM ASR – Run All Inference Modes"
 echo "================================================================"
 echo "Checkpoint:      $CHECKPOINT"
 echo "Language:        $LANGUAGE (${METRIC^^})"
+echo "Data dir:        $DATA_DIR ($DATASET)"
+echo "Infer config:    $INFER_CONFIG"
+echo "Encoder type:    $ENCODER_TYPE"
 echo "Splits:          $SPLITS"
 echo "Infer modes:     $INFER_MODES"
 echo "Filter methods:  $FILTER_METHODS"
@@ -133,13 +157,15 @@ run_infer() {
         --infer-config $INFER_CONFIG \
         --output-dir $output_dir \
         --data-dir $DATA_DIR \
+        --dataset $DATASET \
         --splits $SPLITS \
         --batch-size $BATCH_SIZE \
         --num-beams $NUM_BEAMS \
         --max-new-tokens $MAX_NEW_TOKENS \
         --num-workers $num_workers \
         --data-device $DATA_DEVICE \
-        --language $LANGUAGE"
+        --language $LANGUAGE \
+        --encoder-type $ENCODER_TYPE"
 
     # Add bias list for gt / filter
     if [ "$infer_type" = "gt" ] || [ "$infer_type" = "filter" ]; then

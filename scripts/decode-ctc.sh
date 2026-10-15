@@ -25,24 +25,26 @@ USE_DEVICE=0
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech}"
+DATA_DIR="${DATA_DIR:-/home/25/minh/ctc-assisted-asr-llm/data/csj}"
 DATASET="${DATASET:-auto}"            # auto | librispeech | csj
-LANGUAGE="${LANGUAGE:-en}"            # en = WER, ja = CER (+ kana CER)
+LANGUAGE="${LANGUAGE:-ja}"            # en = WER, ja = CER (+ kana CER)
 CTC_TYPE="${CTC_TYPE:-auto}"          # auto | hf | whisper
 
 # Default to the WavLM-CTC model from the current experiment
-EXP_DIR="${EXP_DIR:-exp/wavlm-ft-ctc_libri_new}"
+EXP_DIR="${EXP_DIR:-exp/whisper-ft-ctc_ja}"
 
-# WAVLM_MODEL="${WAVLM_MODEL:-${EXP_DIR}/final}"
-WAVLM_MODEL="${WAVLM_MODEL:-imprt/kushinada-hubert-large-laborotv2-asr}"
+WAVLM_MODEL="${WAVLM_MODEL:-${EXP_DIR}/final}"
+# WAVLM_MODEL="${WAVLM_MODEL:-imprt/kushinada-hubert-large-laborotv2-asr}"
 
 # OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/ctc_decode}"
-OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/jp_ctc_decode}"
+OUTPUT_DIR="${OUTPUT_DIR:-${EXP_DIR}/ctc_decode}"
 
 # VOCAB_PATH="${VOCAB_PATH:-${EXP_DIR}/vocab.json}"
 # .pt checkpoints need the base WavLM; old Whisper-CTC checkpoints need the Whisper id
-BASE_MODEL="${BASE_MODEL:-microsoft/wavlm-large}"
-SPLITS="${SPLITS:-test-clean test-other dev-clean dev-other}"
+# BASE_MODEL="${BASE_MODEL:-microsoft/wavlm-large}"
+BASE_MODEL="${BASE_MODEL:-openai/whisper-medium}"
+# SPLITS="${SPLITS:-test-clean test-other dev-clean dev-other}"
+SPLITS="${SPLITS:-eval1_whisper_like_clean eval2_whisper_like_clean eval3_whisper_like_clean}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 DATA_DEVICE="${DATA_DEVICE:-cpu}"
 if [ "$DATA_DEVICE" == "cuda" ]; then

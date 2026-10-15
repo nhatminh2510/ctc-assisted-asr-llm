@@ -163,13 +163,17 @@ class SpeechEncoder(nn.Module):
         return "wavlm"
 
     def _init_whisper(self, encoder_id: str) -> None:
-        from transformers import WhisperModel
+        from transformers import WhisperFeatureExtractor, WhisperModel
 
         base_id = whisper_ctc_base(encoder_id)
         fe_source = encoder_id
         if base_id and not (Path(encoder_id) / "preprocessor_config.json").exists():
             fe_source = base_id
-        self.processor, self.feature_extractor = _load_feature_extractor(fe_source)
+        # Load the mel extractor explicitly: Whisper-CTC dirs also ship the kana
+        # CTC tokenizer and no config.json, so AutoProcessor resolves to that
+        # tokenizer instead of a feature extractor.
+        fe = WhisperFeatureExtractor.from_pretrained(fe_source)
+        self.processor, self.feature_extractor = fe, fe
         whisper = WhisperModel.from_pretrained(base_id or encoder_id)
         # We only need the encoder tower.
         self.model = whisper.get_encoder()

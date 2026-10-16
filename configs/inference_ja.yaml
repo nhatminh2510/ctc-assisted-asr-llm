@@ -24,4 +24,6 @@ inference:
   num_beams: 4
   temperature: 1.0
   language: ja                    # Japanese prompt + reading annotations
+  word_backend: auto              # word segmenter for WER / U-WER / B-WER; keep it
+                                  # the same as the one that built the bias list
   use_hotword_filtering: true

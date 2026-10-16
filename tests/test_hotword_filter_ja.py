@@ -98,6 +98,17 @@ def test_multiple_true_hotwords():
     assert {"山田", "佐藤", "東京"}.issubset(out)
 
 
+def test_kana_run_keeps_common_words(tmp_path):
+    # A kana-only hypothesis is mis-segmented (ツカム → ツカ/ム); removing the
+    # common word ツカ must not cut the hotword out of the run.
+    cw = tmp_path / "common.txt"
+    cw.write_text("つか\nは\nの\nを\nこと\n", encoding="utf-8")
+    f = _filter(common_words_path=str(cw))
+    hyp = "トイウケイコウヲツカムコトガデキテ"
+    assert "".join(t.surface for t in f.extract_content_tokens(hyp)) == hyp
+    assert "ツカム" in f.filter_hotwords(hyp, ["ツカム", "ヒナン", "シサツ"])
+
+
 def test_word_num_cap():
     f = HotwordFilter(word_num=2, include_homophones=False)
     hyp = "やまだとさとうとたなかとすずき"

@@ -63,6 +63,13 @@ emits one long unsegmented run. The filter:
   hypothesis (sliding window), so recall does not depend on perfect
   segmentation.
 
+Function words (助詞, 助動詞, 記号 …) and `COMMON_WORDS_PATH` entries are removed
+from the hypothesis **only when it contains kanji**. A kana-only CTC run is
+mis-segmented by the analyzer (ツカム → ツカ/ム, パターン → タパ/ターン), so removal
+would cut syllables out of real words. On CSJ eval1–3 (kana-CTC hypotheses)
+keeping the run whole raises hotword recall from 75/72/79% to 91/91/92% while
+precision drops by only ~1 point.
+
 ### b) Polyphony / multiple readings (多音読み)
 
 The same kanji is read differently in context (生 → セイ/ショウ/なま/…). Retrieval
@@ -153,7 +160,7 @@ The hotword filter runs on a CTC hypothesis. Two options:
 
 ## Metrics
 
-Japanese has no spaces, so WER is meaningless. With `language: ja` (training
+Japanese has no spaces, so whitespace WER is meaningless. With `language: ja` (training
 config) or `LANGUAGE=ja` (inference / CTC decode) the scripts report **CER**
 after NFKC + removing whitespace/punctuation (`src/utils/compute_wer.py`).
 `decode_ctc.py` additionally reports `cer_kana` (CER on katakana readings),
@@ -165,6 +172,44 @@ TensorBoard and saves the best model as `checkpoints/best_cer_model.pt`, which
 
 An empty dataset (wrong `--data-dir` / `--splits`) is now an error instead of
 a silent 0% error rate.
+
+### WER / U-WER / B-WER (R-WER)
+
+Whenever a bias list is passed (`--bias-list-json`, in any mode including
+`nobias`), inference also reports the contextual-biasing metrics of
+[is21_deep_bias](https://github.com/facebookresearch/fbai-speech/tree/main/is21_deep_bias)
+(`src/utils/bias_wer.py`, a port of its `score.py`: one alignment per utterance
+with sub = 4, ins = del = 3, identical results on the reference's own files):
+
+* **B-WER** (= R-WER, rare-word WER): errors on the reference words that are
+  biasing words of that utterance (`true_hotwords`), plus insertions of biasing
+  words;
+* **U-WER**: errors on all other words;
+* **WER**: all words.
+
+They are logged per split and saved under `"bias_wer"` in
+`<split>_summary.json` and `summary.json`.
+
+For Japanese, "words" come from the morphological analyzer
+(`inference.word_backend` in `configs/inference_ja.yaml` or `--word-backend`:
+`auto` = fugashi > sudachipy > pykakasi > char) applied to the CER-normalised
+text. Consecutive morphemes that spell a biasing word are merged back into one
+word, so each biasing word counts once, like an English rare word. Use the same
+backend that built the bias list (`create_bias_list.py` uses `auto`, i.e.
+fugashi + unidic-lite in both containers): with fugashi, 1 of the 3091 CSJ eval
+biasing words fails to align with a word boundary, while SudachiPy's long (mode
+C) units hide ~360 of them inside longer words. The count is reported as
+`unmatched_biasing_words`.
+
+Re-score saved results without re-running inference:
+
+```bash
+H=data/lexicon/csj/hotwords
+python3 pyscripts/score_bias_wer.py --language ja \
+    --details exp/whisper-ft-ctc_llm_contextual/inference/filter-ja \
+    --bias-list-json $H/eval{1,2,3}_whisper_like_clean_bias_list.json \
+    --alignment-out /tmp/align.jsonl   # optional: per-utterance words + alignment
+```
 
 ## End-to-end (Japanese, CSJ)
 

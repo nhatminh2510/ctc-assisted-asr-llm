@@ -45,6 +45,19 @@ def load_bias_lists(paths: List[str]) -> Dict[str, Dict]:
     return merged
 
 
+def biasing_words_for(bias_data: Dict[str, Dict], utt_ids: List[str]) -> List[List[str]]:
+    """Per-utterance biasing words for B-WER: the ``true_hotwords`` (rare words
+    of the reference), as in is21_deep_bias. Utterances missing from
+    ``bias_data`` get none (all their words count as unbiased)."""
+    missing = [u for u in utt_ids if u not in bias_data]
+    if missing:
+        logger.warning(
+            f"{len(missing)}/{len(utt_ids)} utterances have no bias list entry "
+            f"(e.g. {missing[0]}); their words all count as unbiased in B-WER."
+        )
+    return [bias_data.get(u, {}).get("true_hotwords", []) for u in utt_ids]
+
+
 def load_ctc_file(ctc_path: str) -> Dict[str, str]:
     """
     Load CTC pseudo-label file (TSV: utt_id\\tctc_text).
@@ -96,6 +109,8 @@ def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
         "wer": results["wer"],
         "num_samples": len(results["hyps"]),
     }
+    if "bias_wer" in results:
+        summary["bias_wer"] = results["bias_wer"]
     summary_path = out / f"{split}_summary.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)

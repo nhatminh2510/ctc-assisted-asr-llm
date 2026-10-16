@@ -167,8 +167,9 @@ run_infer() {
         --language $LANGUAGE \
         --encoder-type $ENCODER_TYPE"
 
-    # Add bias list for gt / filter
-    if [ "$infer_type" = "gt" ] || [ "$infer_type" = "filter" ]; then
+    # Bias list: required by gt / filter; for nobias it adds the baseline
+    # WER / U-WER / B-WER scoring
+    if [ "$missing_bias" -eq 0 ]; then
         cmd="$cmd --bias-list-json $BIAS_LIST_FILES"
     fi
 

@@ -11,6 +11,10 @@
 #   # Default: nobias mode on test-clean and test-other
 #   bash run-inference.sh
 #
+#   # Any mode + BIAS_LIST_JSON also reports WER / U-WER / B-WER (R-WER),
+#   # e.g. the nobias baseline B-WER:
+#   INFER_TYPE=nobias BIAS_LIST_JSON="..." bash run-inference.sh
+#
 #   # GT mode (requires bias list)
 #   INFER_TYPE=gt \
 #       BIAS_LIST_JSON="data/hotwords/test-clean_bias_list.json data/hotwords/test-other_bias_list.json" \
@@ -88,7 +92,8 @@ else
 fi
 
 # --- Bias list / CTC file (for gt and filter modes) ---
-# Space-separated list of files (one per split)
+# Space-separated list of files (one per split). In nobias mode a bias list is
+# optional and only adds WER / U-WER / B-WER scoring.
 BIAS_LIST_JSON="${BIAS_LIST_JSON:-}"
 CTC_FILE="${CTC_FILE:-}"
 
@@ -229,7 +234,7 @@ if [ "$MODE" = "transcribe" ]; then
 fi
 echo "Batch size:     $BATCH_SIZE"
 echo "Num beams:      $NUM_BEAMS"
-if [ "$INFER_TYPE" = "gt" ] || [ "$INFER_TYPE" = "filter" ]; then
+if [ -n "$BIAS_LIST_JSON" ]; then
     echo "Bias list:      $BIAS_LIST_JSON"
 fi
 if [ "$INFER_TYPE" = "filter" ]; then

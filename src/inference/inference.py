@@ -32,7 +32,13 @@ from src.utils.dataset_utils import load_audio
 from src.utils.config_utils import load_config, setup_logging, set_seed, log_separator
 from src.utils.train_utils import load_checkpoint
 from src.utils.compute_wer import score_transcripts
-from src.utils.inference_utils import load_bias_lists, load_ctc_files, save_results
+from src.utils.bias_wer import BiasWERResult, BiasWERScorer
+from src.utils.inference_utils import (
+    biasing_words_for,
+    load_bias_lists,
+    load_ctc_files,
+    save_results,
+)
 
 if TYPE_CHECKING:
     from src.inference.hotword_filter_F1 import HotwordFilter
@@ -474,6 +480,18 @@ def parse_args():
         choices=["en", "ja"],
         help="Prompt/filter language (default: from config or 'en')",
     )
+    parser.add_argument(
+        "--word-backend",
+        type=str,
+        default=None,
+        choices=["auto", "fugashi", "sudachipy", "pykakasi", "char"],
+        help=(
+            "Japanese word segmenter for WER / U-WER / B-WER (default: "
+            "inference.word_backend from the inference config, else 'auto' = "
+            "fugashi > sudachipy > pykakasi > char). Use the backend the bias "
+            "list was built with."
+        ),
+    )
 
     # --- generation ---
     parser.add_argument("--max-new-tokens", type=int, default=256)
@@ -492,6 +510,7 @@ def parse_args():
         default=None,
         help=(
             "Path(s) to per-utterance bias list JSON(s). "
+            "Also enables WER / U-WER / B-WER scoring (any infer_type). "
             "Pass one per split, e.g.: "
             "--bias-list-json data/hotwords/test-clean_bias_list.json "
             "data/hotwords/test-other_bias_list.json"
@@ -692,6 +711,19 @@ def main():
         )
 
     # ------------------------------------------------------------------
+    # WER / U-WER / B-WER scorer (is21_deep_bias) – whenever a bias list is
+    # given, also in nobias mode for the baseline B-WER.
+    # ------------------------------------------------------------------
+    bias_scorer = None
+    if bias_data is not None and args.mode == "eval":
+        bias_scorer = BiasWERScorer(
+            language,
+            normalizer=None if language == "ja" else BasicTextNormalizer(),
+            ja_backend=args.word_backend or infer_cfg.get("word_backend", "auto"),
+        )
+        logger.info(f"B-WER scoring with '{bias_scorer.split.name}' words")
+
+    # ------------------------------------------------------------------
     # Build model
     # ------------------------------------------------------------------
     device = torch.device(args.data_device if torch.cuda.is_available() else "cpu")
@@ -748,6 +780,7 @@ def main():
     overall_hyps: List[str] = []
     overall_refs: List[str] = []
     split_wers: Dict[str, float] = {}
+    split_bias: Dict[str, BiasWERResult] = {}
 
     t0 = time.time()
 
@@ -826,6 +859,16 @@ def main():
             f"({len(results['hyps'])} utterances)"
         )
 
+        if bias_scorer is not None:
+            bias_res = bias_scorer.score(
+                results["raw_hyps"],
+                results["raw_refs"],
+                biasing_words_for(bias_data, results["utt_ids"]),
+            )
+            split_bias[split] = bias_res
+            results["bias_wer"] = bias_res.to_dict()
+            logger.info(f"[{split}] ({bias_res.word_splitter} words)\n{bias_res}")
+
         # Save per-split results
         save_results(results, args.output_dir, split)
 
@@ -839,12 +882,22 @@ def main():
         )
         split_wers["overall"] = overall_wer
         logger.info(f"\nOverall {metric.upper()} = {overall_wer*100:.2f}%")
+        if split_bias:
+            split_bias["overall"] = sum(split_bias.values(), BiasWERResult())
 
     # Print summary
     log_separator()
     logger.info(f"INFERENCE RESULTS  (infer_type={args.infer_type})")
     for split, w in split_wers.items():
-        logger.info(f"  {split:20s}  {metric.upper()} = {w*100:.2f}%")
+        line = f"  {split:20s}  {metric.upper()} = {w*100:.2f}%"
+        if split in split_bias:
+            b = split_bias[split]
+            rates = [
+                "n/a" if c.rate is None else f"{c.rate*100:.2f}%"
+                for c in (b.wer, b.u_wer, b.b_wer)
+            ]
+            line += " | WER = {} | U-WER = {} | B-WER = {}".format(*rates)
+        logger.info(line)
     logger.info(f"  {'time':20s}  {elapsed:.1f}s ({elapsed/60:.1f}min)")
 
     # Save global summary
@@ -858,7 +911,9 @@ def main():
                 "language": language,
                 "metric": metric,
                 # key kept as "wer" for existing tooling; holds CER when metric == "cer"
-                "wer": split_wers,
+                f"{metric}": split_wers,
+                # WER / U-WER / B-WER (R-WER) per split, when a bias list was given
+                "bias_wer": {k: v.to_dict() for k, v in split_bias.items()} or None,
                 "num_samples": len(overall_hyps),
                 "elapsed_seconds": elapsed,
                 "config": {

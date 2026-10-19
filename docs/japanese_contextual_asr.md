@@ -211,6 +211,26 @@ python3 pyscripts/score_bias_wer.py --language ja \
     --alignment-out /tmp/align.jsonl   # optional: per-utterance words + alignment
 ```
 
+Score the hotword filter alone — no LLM, no GPU, seconds per split — on the
+cached CTC decodes: recall / precision of the picked hotwords against
+`true_hotwords` (exact match, summed over utterances). Precision counts the
+picks of utterances without any true hotword (72% of eval1), so compare it
+between settings rather than reading it as an absolute number. Flags override
+the `hotword_filter` section of `--infer-config`:
+
+```bash
+python3 pyscripts/eval_hotword_filter.py --filter-method ja \
+    --infer-config configs/inference_ja.yaml \
+    --common-words-path data/lexicon/csj/common_words_5k.txt \
+    --ctc-file exp/whisper-ft-ctc_ja/ctc_decode/eval{1,2,3}_whisper_like_clean_ctc.tsv \
+    --bias-list-json $H/eval{1,2,3}_whisper_like_clean_bias_list.json \
+    --misses-out /tmp/misses.jsonl     # optional: utterances that missed a true hotword
+```
+
+Readings depend on the container: with pykakasi installed
+(`ctc-asr-llm_ja_cuda12.4.sif`) recall is 91.6 / 91.1 / 91.6% on eval1/2/3,
+without it (`prefix-tree.sif`) 90.8 / 90.7 / 91.5%.
+
 ## End-to-end (Japanese, CSJ)
 
 CSJ is read from the ESPnet `dump/raw` layout (`data/csj` symlink, Kaldi

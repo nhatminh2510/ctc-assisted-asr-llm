@@ -20,7 +20,7 @@ def load_bias_list(bias_list_json: str) -> Dict[str, Dict]:
         "transcription": "...",
     }
     """
-    with open(bias_list_json, "r") as f:
+    with open(bias_list_json, "r", encoding="utf-8") as f:
         data = json.load(f)
     result = {}
     for entry in data:
@@ -43,6 +43,19 @@ def load_bias_lists(paths: List[str]) -> Dict[str, Dict]:
         f"Merged bias lists: {len(merged)} utterances from {len(paths)} file(s)"
     )
     return merged
+
+
+def biasing_words_for(bias_data: Dict[str, Dict], utt_ids: List[str]) -> List[List[str]]:
+    """Per-utterance biasing words for B-WER: the ``true_hotwords`` (rare words
+    of the reference), as in is21_deep_bias. Utterances missing from
+    ``bias_data`` get none (all their words count as unbiased)."""
+    missing = [u for u in utt_ids if u not in bias_data]
+    if missing:
+        logger.warning(
+            f"{len(missing)}/{len(utt_ids)} utterances have no bias list entry "
+            f"(e.g. {missing[0]}); their words all count as unbiased in B-WER."
+        )
+    return [bias_data.get(u, {}).get("true_hotwords", []) for u in utt_ids]
 
 
 def load_ctc_file(ctc_path: str) -> Dict[str, str]:
@@ -92,9 +105,12 @@ def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
     # 1. Summary JSON
     summary = {
         "split": split,
+        "metric": results.get("metric", "wer"),
         "wer": results["wer"],
         "num_samples": len(results["hyps"]),
     }
+    if "bias_wer" in results:
+        summary["bias_wer"] = results["bias_wer"]
     summary_path = out / f"{split}_summary.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
@@ -119,13 +135,13 @@ def save_results(results: Dict[str, Any], output_dir: str, split: str) -> None:
             }
         )
     details_path = out / f"{split}_details.json"
-    with open(details_path, "w") as f:
+    with open(details_path, "w", encoding="utf-8") as f:
         json.dump(details, f, indent=2, ensure_ascii=False)
     logger.info(f"Details saved to {details_path}")
 
     # 3. Plain text hyp/ref files (for external scoring tools)
-    with open(out / f"{split}_hyp.txt", "w") as fh, open(
-        out / f"{split}_ref.txt", "w"
+    with open(out / f"{split}_hyp.txt", "w", encoding="utf-8") as fh, open(
+        out / f"{split}_ref.txt", "w", encoding="utf-8"
     ) as fr:
         for uid, hyp, ref in zip(results["utt_ids"], results["hyps"], results["refs"]):
             fh.write(f"{uid} {hyp}\n")

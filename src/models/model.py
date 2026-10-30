@@ -2,10 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (
-    WavLMForCTC,
     AutoTokenizer,
-    AutoProcessor,
-    AutoFeatureExtractor,
     AutoModelForCausalLM,
 )
 
@@ -15,30 +12,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.models.projector import AudioProjector
+from src.models.encoder import SpeechEncoder
+from src.utils.create_prompt import LLAMA3_EOT_TOKEN, detect_prompt_format
 from typing import Optional, Tuple, List
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def load_encoder_processor(encoder_id: str):
-    """Load an audio processor for the encoder.
-
-    Finetuned WavLM-CTC directories include a tokenizer-backed processor,
-    while base WavLM checkpoints usually only provide a feature extractor.
-    The rest of the code only needs audio preprocessing, so falling back to a
-    feature extractor is sufficient.
-    """
-    try:
-        return AutoProcessor.from_pretrained(encoder_id)
-    except Exception as exc:
-        logger.warning(
-            "Falling back to AutoFeatureExtractor for %s because AutoProcessor "
-            "could not be loaded: %s",
-            encoder_id,
-            exc,
-        )
-        return AutoFeatureExtractor.from_pretrained(encoder_id)
 
 
 class CTCAssistedLLMASR(nn.Module):
@@ -50,25 +29,28 @@ class CTCAssistedLLMASR(nn.Module):
         freeze_llm: bool = True,
         use_lora: bool = False,  # Added LoRA flag
         use_gradient_checkpointing: bool = False,
+        encoder_type: str = "auto",  # "auto" | "wavlm"/"hubert"/"wav2vec2" | "whisper"
     ):
         super().__init__()
 
         logger.info("Initializing CTC-Assisted LLM-Based Contextual ASR Model...")
 
-        # 1. Load WavLM Encoder
+        # 1. Load speech encoder (WavLM/HuBERT-CTC or Whisper) behind a common
+        #    interface, so the rest of the model is encoder-agnostic.
         try:
-            logger.info(f"Loading WavLM encoder: {encoder_id}")
-            self.encoder = WavLMForCTC.from_pretrained(encoder_id)
-            self.encoder_processor = load_encoder_processor(encoder_id)
-            self.encoder_hidden_size = self.encoder.config.hidden_size
+            self.encoder = SpeechEncoder(
+                encoder_id,
+                encoder_type=encoder_type,
+                freeze=freeze_encoder,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+            )
+            # Backward-compatible aliases used elsewhere in the codebase.
+            self.encoder_processor = self.encoder.processor
+            self.encoder_hidden_size = self.encoder.hidden_size
         except Exception as e:
-            logger.error(f"Error loading WavLM: {e}")
+            logger.error(f"Error loading encoder {encoder_id}: {e}")
             raise
-        self.conv_stride = 5  # Store for attention mask calculation
-
-        if freeze_encoder:
-            self.encoder.requires_grad_(False)
-            logger.info("WavLM encoder frozen")
+        self.conv_stride = 5  # Projector downsampling factor (frames per token)
 
         # 3. Load LLM
         logger.info(f"Loading LLM: {decoder_id}")
@@ -81,6 +63,19 @@ class CTCAssistedLLMASR(nn.Module):
         logger.info(
             f"Tokenizer loaded. Pad token: {self.decoder_processor.pad_token}, "
             f"EOS token: {self.decoder_processor.eos_token}"
+        )
+
+        # Chat scaffold for the prompt ("vicuna" or "llama3"), and the token ids
+        # that end the assistant turn during generation. Llama-3 answers are
+        # terminated with <|eot_id|>, which differs from eos_token on base models.
+        self.prompt_format = detect_prompt_format(self.decoder_processor)
+        self.stop_token_ids = [self.decoder_processor.eos_token_id]
+        if self.prompt_format == "llama3":
+            eot_id = self.decoder_processor.convert_tokens_to_ids(LLAMA3_EOT_TOKEN)
+            if eot_id not in self.stop_token_ids:
+                self.stop_token_ids.append(eot_id)
+        logger.info(
+            f"Prompt format: {self.prompt_format} | Stop token ids: {self.stop_token_ids}"
         )
 
         self.llm = AutoModelForCausalLM.from_pretrained(
@@ -118,9 +113,8 @@ class CTCAssistedLLMASR(nn.Module):
             conv_kernel_size=self.conv_stride,
         )
 
-        # 5. Gradient checkpointing
+        # 5. Gradient checkpointing (encoder GC is handled inside SpeechEncoder)
         if use_gradient_checkpointing:
-            self.encoder.gradient_checkpointing_enable()
             self.llm.gradient_checkpointing_enable()
             logger.info("Gradient checkpointing enabled")
 
@@ -134,18 +128,15 @@ class CTCAssistedLLMASR(nn.Module):
         self,
         audio_input: torch.FloatTensor,
         attention_mask: torch.LongTensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # Validate input
-        if audio_input.dim() != 2:
-            raise ValueError(
-                f"audio_input must be 2D (batch, length), got {audio_input.shape}"
-            )
+    ) -> torch.Tensor:
+        """Extract encoder hidden states.
+
+        ``audio_input`` is the encoder's native input: a 2D waveform batch for
+        WavLM/HuBERT-CTC encoders, or a 3D log-mel batch for Whisper. The
+        :class:`SpeechEncoder` wrapper handles the difference.
+        """
         try:
-            encoder_output = self.encoder(
-                audio_input, attention_mask=attention_mask, output_hidden_states=True
-            )
-            audio_features = encoder_output.hidden_states[-1]
-            return audio_features
+            return self.encoder.extract_features(audio_input, attention_mask)
         except Exception as e:
             logger.error(f"Error in encode_audio: {e}")
             raise
@@ -178,9 +169,7 @@ class CTCAssistedLLMASR(nn.Module):
         audio_embeds = self.projector(audio_features)
 
         # 3. Calculate projected audio lengths và mask
-        encoder_lengths = self.encoder._get_feat_extract_output_lengths(
-            encoder_attention_mask.sum(dim=1)
-        )
+        encoder_lengths = self.encoder.output_lengths(encoder_attention_mask)
         proj_lengths = encoder_lengths // self.projector.conv.kernel_size[0]
         max_proj_len = proj_lengths.max().item()
         audio_embeds = audio_embeds[:, :max_proj_len]
@@ -280,7 +269,7 @@ class CTCAssistedLLMASR(nn.Module):
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
-            eos_token_id=self.decoder_processor.eos_token_id,
+            eos_token_id=self.stop_token_ids,
             pad_token_id=self.decoder_processor.pad_token_id,
             **kwargs,
         )

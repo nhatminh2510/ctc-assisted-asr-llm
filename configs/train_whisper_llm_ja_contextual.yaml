@@ -1,0 +1,54 @@
+# Training config: Whisper encoder + LLM for Japanese contextual ASR.
+#
+# The projector is the only trainable module (encoder + LLM frozen), exactly as
+# in the WavLM configs — only the encoder and language change.
+#
+#   python src/train.py --config configs/train_whisper_llm_ja_contextual.yaml \
+#       --data-dir data/csj --output-dir exp/whisper_llm_ja
+
+model:
+  # Any Whisper checkpoint works; the encoder tower is used as the speech
+  # encoder. large-v3 = d_model 1280, medium = 1024, small = 768, base = 512.
+  # Kana-CTC fine-tuned Whisper encoder (src/finetune/whisper_ft_ctc.py); the
+  # dir's whisper_ctc_config.json names the base model (openai/whisper-medium).
+  # Use openai/whisper-medium here for the raw, non-fine-tuned encoder.
+  encoder_path: /home/25/minh/ctc-assisted-asr-llm/exp/whisper-ft-ctc_ja/final
+  encoder_type: whisper              # "auto" also detects Whisper from the config
+  # Use a Japanese-capable causal LLM as the decoder, e.g.
+  #   tokyotech-llm/Swallow-7b-instruct-hf, elyza/ELYZA-japanese-Llama-2-7b, ...
+  llm_model_path: tokyotech-llm/Llama-3.1-Swallow-8B-Instruct-v0.5
+  freeze_encoder: true
+  freeze_llm: true
+  use_lora: false
+
+training:
+  batch_size: 4
+  grad_accumulation: 1
+  learning_rate: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.0
+  warmup_steps: 1000
+  max_steps: 100000
+  num_epochs: 0
+  gradient_clip: 1.0
+  clip_grad_norm: 1.0
+  eval_every: 5000
+  save_every: 20000
+  save_total_limit: 2
+  log_every: 100
+  num_workers: 4
+  pin_memory:
+
+data:
+  sample_rate: 16000
+  language: ja                       # morphological segmentation + JA prompt; eval metric = CER
+  # CSJ in ESPnet dump/raw layout: pass --data-dir data/csj
+  dataset: csj                       # librispeech | csj | auto
+  train_splits:
+    - train_nodup_whisper_like_clean
+  val_splits:
+    - train_dev_whisper_like_clean
+  p_keep: 0.5
+  n_phrases: 1
+  n_order_max: 4

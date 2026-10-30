@@ -1,0 +1,29 @@
+# Inference config for Japanese contextual ASR.
+#
+#   bash scripts/run-inference.sh   with:
+#     INFER_CONFIG=configs/inference_ja.yaml
+#     INFER_TYPE=filter FILTER_METHOD=ja LANGUAGE=ja
+#
+# See src/inference/hotword_filter_ja.py for what each knob does.
+
+hotword_filter:
+  n_gram: 2
+  word_num: 15
+  probability_threshold: 0.5      # precision floor on the combined score
+
+  # --- Japanese-specific ---
+  tokenizer_backend: auto         # fugashi > sudachipy > pykakasi > char
+  reading_weight: 1.0             # weight of the reading-similarity term
+  surface_bonus: 0.3              # tie-breaker when the hypothesis has kanji
+  include_homophones: true        # emit 同音異字 (同じ読み・異なる漢字) together
+  max_homophones: 3               # cap homophones added per selected hotword
+  per_word_scoring: false         # false = keep all above threshold (best recall)
+
+inference:
+  max_new_tokens: 256
+  num_beams: 4
+  temperature: 1.0
+  language: ja                    # Japanese prompt + reading annotations
+  word_backend: auto              # word segmenter for WER / U-WER / B-WER; keep it
+                                  # the same as the one that built the bias list
+  use_hotword_filtering: true

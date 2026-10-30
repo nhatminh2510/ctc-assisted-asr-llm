@@ -9,7 +9,7 @@ USE_DEVICE=0
 # Singapore, Toronto is shit
 
 # Check if data exists
-data_dir="/home/25/minh/ctc-assisted-asr-llm/data/LibriSpeech"
+data_dir="/home/25/minh/ctc-assisted-asr-llm/data/csj"
 if [ ! -d "$data_dir" ] && [ ! -L "$data_dir" ]; then
     echo "ERROR: Data not found at $data_dir"
     echo "Please ensure data is properly placed in the data directory."
@@ -18,16 +18,15 @@ fi
 
 # pt-wavlm_llm_no-contextual
 # conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual_GB10.yaml"
-# conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual.yaml"
-# output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/pt-wavlm_llm_libri_no-contextual"
+    # conf="/home/minh/ctc-assisted-asr-llm/configs/train_pt-wavlm_llm_no-contextual.yaml"r-llm/exp/pt-wavlm_llm_libri_no-contextual"
 
 # wavlm-ft-ctc_llm_no-contextual
 # conf="/home/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_no-contextual.yaml"
 # output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_no-contextual"
 
 # wavlm-ft-ctc_llm_contextual
-conf="/home/minh/ctc-assisted-asr-llm/configs/train_wavlm-ft-ctc_llm_contextual.yaml"
-output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/wavlm-ft-ctc_llm_libri_contextual"
+conf="/home/minh/ctc-assisted-asr-llm/configs/train_whisper_llm_ja_contextual.yaml"
+output_dir="/home/25/minh/ctc-assisted-asr-llm/exp/whisper-ft-ctc_llm_contextual"
 
 # Check if config exists
 if [ ! -f "$conf" ]; then

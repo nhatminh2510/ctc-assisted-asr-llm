@@ -26,24 +26,31 @@ from whisper.normalizers import BasicTextNormalizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.models.model import CTCAssistedLLMASR
-from src.dataset.librispeech_dataset import LibriSpeechDataset
-from src.utils.create_prompt import create_prompt_with_hotwords
+from src.dataset.factory import DATASET_TYPES, build_dataset
+from src.utils.create_prompt import create_prompt_with_hotwords, detect_prompt_format
 from src.utils.dataset_utils import load_audio
 from src.utils.config_utils import load_config, setup_logging, set_seed, log_separator
 from src.utils.train_utils import load_checkpoint
-from src.utils.compute_wer import compute_wer
-from src.utils.inference_utils import load_bias_lists, load_ctc_files, save_results
+from src.utils.compute_wer import score_transcripts
+from src.utils.bias_wer import BiasWERResult, BiasWERScorer
+from src.utils.inference_utils import (
+    biasing_words_for,
+    load_bias_lists,
+    load_ctc_files,
+    save_results,
+)
 
 if TYPE_CHECKING:
     from src.inference.hotword_filter_F1 import HotwordFilter
 
 logger = logging.getLogger(__name__)
 
-# Filter method defaults (from paper Table 4)
+# Filter method defaults (from paper Table 4; "ja" is the Japanese filter)
 FILTER_DEFAULTS = {
     "F1": {"probability_threshold": 0.95, "word_num": 5},
     "F2": {"probability_threshold": 0.9, "word_num": 15},
     "F3": {"probability_threshold": 0.9, "word_num": 15},
+    "ja": {"probability_threshold": 0.5, "word_num": 15},
 }
 
 
@@ -55,43 +62,46 @@ def load_hotword_filter(method: str):
         from src.inference.hotword_filter_F2 import HotwordFilter
     elif method == "F3":
         from src.inference.hotword_filter_F3 import HotwordFilter
+    elif method == "ja":
+        from src.inference.hotword_filter_ja import HotwordFilter
     else:
-        raise ValueError(f"Unknown filter method: {method}. Choose from F1, F2, F3.")
+        raise ValueError(
+            f"Unknown filter method: {method}. Choose from F1, F2, F3, ja."
+        )
     return HotwordFilter
 
 
 # ---------------------------------------------------------------------------
 # Collate functions for each inference mode
 # ---------------------------------------------------------------------------
-def get_nobias_collate_fn(encoder_processor, decoder_processor, device: str = "cuda"):
+def get_nobias_collate_fn(
+    encoder, decoder_processor, device: str = "cuda", language: str = "en"
+):
     """
     Collate for nobias mode: no hotwords in prompt.
-    Prompt: "USER: Transcribe speech to text.\\n ASSISTANT:"
+    Prompt (Vicuna): "USER: Transcribe speech to text.\\n ASSISTANT:"
     """
-    prompt_text = create_prompt_with_hotwords([])
+    prompt_text = create_prompt_with_hotwords(
+        [], language=language, prompt_format=detect_prompt_format(decoder_processor)
+    )
+    move_to = device if device == "cuda" else None
 
     def collate_fn(batch):
-        encoder_inputs = encoder_processor(
-            [sample["audio"] for sample in batch],
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-            padding=True,
+        encoder_inputs = encoder.process_audio(
+            [sample["audio"] for sample in batch], device=move_to
         )
-        if device == "cuda":
-            encoder_inputs = encoder_inputs.to(device)
 
         prompt_inputs = decoder_processor(
             [prompt_text] * len(batch),
             return_tensors="pt",
             padding=True,
         )
-        if device == "cuda":
+        if move_to:
             prompt_inputs = prompt_inputs.to(device)
 
         return {
-            "input_values": encoder_inputs.input_values,
-            "encoder_attention_mask": encoder_inputs.attention_mask,
+            "input_values": encoder_inputs["input_values"],
+            "encoder_attention_mask": encoder_inputs["encoder_attention_mask"],
             "generate_input_ids": prompt_inputs.input_ids,
             "generate_attention_mask": prompt_inputs.attention_mask,
             "transcription": [s["transcription"] for s in batch],
@@ -102,48 +112,54 @@ def get_nobias_collate_fn(encoder_processor, decoder_processor, device: str = "c
 
 
 def get_gt_collate_fn(
-    encoder_processor,
+    encoder,
     decoder_processor,
     bias_data: Dict[str, Dict],
     device: str = "cuda",
+    language: str = "en",
+    reading_fn=None,
 ):
     """
     Collate for gt (ground-truth) mode: use true_hotwords from bias list.
     Each utterance gets its own per-utterance prompt (no batch sharing).
+
+    ``reading_fn`` (optional) maps a surface hotword to its reading; when given
+    (Japanese) the prompt annotates each hotword as ``橋（ハシ）``.
     """
+    move_to = device if device == "cuda" else None
+    prompt_format = detect_prompt_format(decoder_processor)
 
     def collate_fn(batch):
-        encoder_inputs = encoder_processor(
-            [sample["audio"] for sample in batch],
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-            padding=True,
+        encoder_inputs = encoder.process_audio(
+            [sample["audio"] for sample in batch], device=move_to
         )
-        if device == "cuda":
-            encoder_inputs = encoder_inputs.to(device)
 
         # Per-utterance GT hotwords
         prompts = []
         for sample in batch:
             uid = sample.get("utterance_id", "")
-            if uid in bias_data:
-                hw = bias_data[uid]["true_hotwords"]
-            else:
-                hw = []
-            prompts.append(create_prompt_with_hotwords(hw))
+            hw = bias_data[uid]["true_hotwords"] if uid in bias_data else []
+            readings = [reading_fn(w) for w in hw] if reading_fn else None
+            prompts.append(
+                create_prompt_with_hotwords(
+                    hw,
+                    language=language,
+                    readings=readings,
+                    prompt_format=prompt_format,
+                )
+            )
 
         prompt_inputs = decoder_processor(
             prompts,
             return_tensors="pt",
             padding=True,
         )
-        if device == "cuda":
+        if move_to:
             prompt_inputs = prompt_inputs.to(device)
 
         return {
-            "input_values": encoder_inputs.input_values,
-            "encoder_attention_mask": encoder_inputs.attention_mask,
+            "input_values": encoder_inputs["input_values"],
+            "encoder_attention_mask": encoder_inputs["encoder_attention_mask"],
             "generate_input_ids": prompt_inputs.input_ids,
             "generate_attention_mask": prompt_inputs.attention_mask,
             "transcription": [s["transcription"] for s in batch],
@@ -154,28 +170,32 @@ def get_gt_collate_fn(
 
 
 def get_filter_collate_fn(
-    encoder_processor,
+    encoder,
     decoder_processor,
     bias_data: Dict[str, Dict],
     ctc_data: Dict[str, str],
     hotword_filter: "HotwordFilter",
     device: str = "cuda",
+    language: str = "en",
 ):
     """
     Collate for filter mode: use CTC pseudo-labels + HotwordFilter to select
     relevant hotwords from the bias list for each utterance.
+
+    For Japanese (``language == "ja"``) the filter also returns each hotword's
+    reading, which is injected into the prompt as ``橋（ハシ）`` so the LLM can
+    disambiguate homophones the (kana) CTC hypothesis cannot.
     """
+    move_to = device if device == "cuda" else None
+    use_readings = language == "ja" and hasattr(
+        hotword_filter, "filter_hotwords_with_readings"
+    )
+    prompt_format = detect_prompt_format(decoder_processor)
 
     def collate_fn(batch):
-        encoder_inputs = encoder_processor(
-            [sample["audio"] for sample in batch],
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-            padding=True,
+        encoder_inputs = encoder.process_audio(
+            [sample["audio"] for sample in batch], device=move_to
         )
-        if device == "cuda":
-            encoder_inputs = encoder_inputs.to(device)
 
         # Per-utterance filtered hotwords
         prompts = []
@@ -184,24 +204,39 @@ def get_filter_collate_fn(
             ctc_text = ctc_data.get(uid, "")
             bias_list = bias_data.get(uid, {}).get("bias_list", [])
 
+            readings = None
             if ctc_text and bias_list:
-                filtered_hw = hotword_filter.filter_hotwords(ctc_text, bias_list)
+                if use_readings:
+                    pairs = hotword_filter.filter_hotwords_with_readings(
+                        ctc_text, bias_list
+                    )
+                    filtered_hw = [s for s, _ in pairs]
+                    readings = [r for _, r in pairs]
+                else:
+                    filtered_hw = hotword_filter.filter_hotwords(ctc_text, bias_list)
             else:
                 filtered_hw = []
 
-            prompts.append(create_prompt_with_hotwords(filtered_hw))
+            prompts.append(
+                create_prompt_with_hotwords(
+                    filtered_hw,
+                    language=language,
+                    readings=readings,
+                    prompt_format=prompt_format,
+                )
+            )
 
         prompt_inputs = decoder_processor(
             prompts,
             return_tensors="pt",
             padding=True,
         )
-        if device == "cuda":
+        if move_to:
             prompt_inputs = prompt_inputs.to(device)
 
         return {
-            "input_values": encoder_inputs.input_values,
-            "encoder_attention_mask": encoder_inputs.attention_mask,
+            "input_values": encoder_inputs["input_values"],
+            "encoder_attention_mask": encoder_inputs["encoder_attention_mask"],
             "generate_input_ids": prompt_inputs.input_ids,
             "generate_attention_mask": prompt_inputs.attention_mask,
             "transcription": [s["transcription"] for s in batch],
@@ -222,11 +257,14 @@ def evaluate_dataset(
     num_beams: int = 4,
     do_sample: bool = False,
     data_device: str = "cuda",
+    language: str = "en",
 ) -> Dict[str, Any]:
-    """Run inference over a DataLoader and compute WER.
+    """Run inference over a DataLoader and score it (WER for en, CER for ja).
 
     Returns a dict with:
-        wer       – float, overall WER
+        metric    – "wer" or "cer"
+        wer       – float, error rate under ``metric`` (key kept for
+                    backward compatibility; it is the CER for Japanese)
         hyps      – list[str], normalised hypotheses
         refs      – list[str], normalised references
         raw_hyps  – list[str], raw hypotheses (before normalisation)
@@ -275,14 +313,14 @@ def evaluate_dataset(
             logger.debug(f"HYP: {hyp}")
             logger.debug(f"REF: {ref}")
 
-    # Normalise
-    hyps = [normalizer(h.strip()) for h in raw_hyps]
-    refs = [normalizer(r.strip()) for r in raw_refs]
-
-    wer_score = compute_wer(hyps, refs) if hyps and refs else 0.0
+    # Normalise + score (raises on an empty dataset instead of reporting 0%)
+    metric, error_rate, hyps, refs = score_transcripts(
+        raw_hyps, raw_refs, language=language, normalizer=normalizer
+    )
 
     return {
-        "wer": wer_score,
+        "metric": metric,
+        "wer": error_rate,
         "hyps": hyps,
         "refs": refs,
         "raw_hyps": raw_hyps,
@@ -302,27 +340,27 @@ def transcribe_single(
     hotwords: Optional[List[str]] = None,
     max_new_tokens: int = 256,
     num_beams: int = 4,
+    language: str = "en",
 ) -> str:
     """Transcribe a single audio file and return the text."""
     model.eval()
 
-    audio = load_audio(audio_path).to(device)
-    encoder_inputs = model.encoder_processor(
-        audio.squeeze(0).cpu().numpy(),
-        sampling_rate=16000,
-        return_tensors="pt",
-        return_attention_mask=True,
-    ).to(device)
+    audio = load_audio(audio_path)
+    encoder_inputs = model.encoder.process_audio(
+        [audio.squeeze(0).cpu().numpy()], device=str(device)
+    )
 
-    prompt = create_prompt_with_hotwords(hotwords or [])
+    prompt = create_prompt_with_hotwords(
+        hotwords or [], language=language, prompt_format=model.prompt_format
+    )
     prompt_inputs = model.decoder_processor(
         prompt, return_tensors="pt", padding=True
     ).to(device)
 
     generated_ids = model.generate(
-        input_values=encoder_inputs.input_values,
+        input_values=encoder_inputs["input_values"],
         input_ids=prompt_inputs.input_ids,
-        encoder_attention_mask=encoder_inputs.attention_mask,
+        encoder_attention_mask=encoder_inputs["encoder_attention_mask"],
         decoder_attention_mask=prompt_inputs.attention_mask,
         max_new_tokens=max_new_tokens,
         num_beams=num_beams,
@@ -347,7 +385,7 @@ def parse_args():
         "--mode",
         choices=["eval", "transcribe"],
         default="eval",
-        help="'eval' – evaluate on LibriSpeech test splits. 'transcribe' – single file.",
+        help="'eval' – evaluate on dataset test splits. 'transcribe' – single file.",
     )
     parser.add_argument(
         "--infer-type",
@@ -384,7 +422,14 @@ def parse_args():
         "--data-dir",
         type=str,
         default="data/LibriSpeech",
-        help="Root directory of LibriSpeech data (for eval mode)",
+        help="Dataset root: LibriSpeech dir, or CSJ dump/raw dir (for eval mode)",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=list(DATASET_TYPES),
+        default="auto",
+        help="Dataset layout: librispeech, csj (Kaldi text/wav.scp), or auto-detect",
     )
     parser.add_argument(
         "--output-dir",
@@ -405,7 +450,7 @@ def parse_args():
         type=str,
         nargs="+",
         default=["test-clean", "test-other"],
-        help="LibriSpeech splits to evaluate",
+        help="Splits to evaluate (e.g. test-clean, or eval1_whisper_like_clean for CSJ)",
     )
 
     # --- model ---
@@ -413,13 +458,39 @@ def parse_args():
         "--wavlm-model",
         type=str,
         default=None,
-        help="WavLM model id or path (overrides config)",
+        help="Encoder model id or path (overrides config)",
+    )
+    parser.add_argument(
+        "--encoder-type",
+        type=str,
+        default=None,
+        choices=["auto", "wavlm", "hubert", "wav2vec2", "whisper"],
+        help="Speech encoder family (default: auto-detect from the checkpoint)",
     )
     parser.add_argument(
         "--llm-model",
         type=str,
         default=None,
         help="LLM model id or path (overrides config)",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default=None,
+        choices=["en", "ja"],
+        help="Prompt/filter language (default: from config or 'en')",
+    )
+    parser.add_argument(
+        "--word-backend",
+        type=str,
+        default=None,
+        choices=["auto", "fugashi", "sudachipy", "pykakasi", "char"],
+        help=(
+            "Japanese word segmenter for WER / U-WER / B-WER (default: "
+            "inference.word_backend from the inference config, else 'auto' = "
+            "fugashi > sudachipy > pykakasi > char). Use the backend the bias "
+            "list was built with."
+        ),
     )
 
     # --- generation ---
@@ -439,6 +510,7 @@ def parse_args():
         default=None,
         help=(
             "Path(s) to per-utterance bias list JSON(s). "
+            "Also enables WER / U-WER / B-WER scoring (any infer_type). "
             "Pass one per split, e.g.: "
             "--bias-list-json data/hotwords/test-clean_bias_list.json "
             "data/hotwords/test-other_bias_list.json"
@@ -461,13 +533,14 @@ def parse_args():
     parser.add_argument(
         "--filter-method",
         type=str,
-        choices=["F1", "F2", "F3"],
+        choices=["F1", "F2", "F3", "ja"],
         default="F3",
         help=(
             "Hotword filtering method (for filter mode):\n"
             "  F1 – no common word removal, threshold=0.95, max=5\n"
             "  F2 – common word removal, whole-sentence scoring, threshold=0.9\n"
-            "  F3 – common word removal, per-word best-match, no threshold (default)"
+            "  F3 – common word removal, per-word best-match, no threshold (default)\n"
+            "  ja – Japanese reading-based filter (segmentation + homophone-aware)"
         ),
     )
     parser.add_argument(
@@ -554,8 +627,11 @@ def main():
     # CLI overrides
     wavlm_id = args.wavlm_model or model_cfg.get("encoder_path", "facebook/wavlm-large")
     llm_id = args.llm_model or model_cfg.get("llm_model_path", "lmsys/vicuna-7b-v1.5")
+    encoder_type = args.encoder_type or model_cfg.get("encoder_type", "auto")
+    language = args.language or infer_cfg.get("language", "en")
     max_new_tokens = args.max_new_tokens or infer_cfg.get("max_new_tokens", 256)
     num_beams = args.num_beams or infer_cfg.get("num_beams", 4)
+    logger.info(f"Encoder type: {encoder_type} | Language: {language}")
 
     # ------------------------------------------------------------------
     # Validate mode-specific requirements
@@ -610,16 +686,42 @@ def main():
         n_gram = filter_cfg.get("n_gram", 2)
 
         HotwordFilter = load_hotword_filter(filter_method)
-        hotword_filter = HotwordFilter(
+        filter_kwargs = dict(
             common_words_path=common_words_path,
             n_gram=n_gram,
             word_num=word_num,
             probability_threshold=prob_threshold,
         )
+        if filter_method == "ja":
+            # Optional Japanese-specific knobs (all have sensible defaults).
+            for key in (
+                "tokenizer_backend",
+                "reading_weight",
+                "surface_bonus",
+                "include_homophones",
+                "max_homophones",
+                "per_word_scoring",
+            ):
+                if key in filter_cfg:
+                    filter_kwargs[key] = filter_cfg[key]
+        hotword_filter = HotwordFilter(**filter_kwargs)
         logger.info(
             f"HotwordFilter [{filter_method}]: n_gram={n_gram}, word_num={word_num}, "
             f"threshold={prob_threshold}, common_words={common_words_path}"
         )
+
+    # ------------------------------------------------------------------
+    # WER / U-WER / B-WER scorer (is21_deep_bias) – whenever a bias list is
+    # given, also in nobias mode for the baseline B-WER.
+    # ------------------------------------------------------------------
+    bias_scorer = None
+    if bias_data is not None and args.mode == "eval":
+        bias_scorer = BiasWERScorer(
+            language,
+            normalizer=None if language == "ja" else BasicTextNormalizer(),
+            ja_backend=args.word_backend or infer_cfg.get("word_backend", "auto"),
+        )
+        logger.info(f"B-WER scoring with '{bias_scorer.split.name}' words")
 
     # ------------------------------------------------------------------
     # Build model
@@ -633,6 +735,7 @@ def main():
         decoder_id=llm_id,
         freeze_encoder=True,
         freeze_llm=True,
+        encoder_type=encoder_type,
     )
 
     logger.info(f"Loading checkpoint: {ckpt_path}")
@@ -654,6 +757,7 @@ def main():
             hotwords=args.hotwords,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
+            language=language,
         )
         logger.info(f"\nTranscription: {text}\n")
         out = {"audio": args.audio, "transcription": text}
@@ -666,7 +770,7 @@ def main():
         return
 
     # ------------------------------------------------------------------
-    # Eval mode – evaluate on LibriSpeech test splits
+    # Eval mode – evaluate on dataset test splits
     # ------------------------------------------------------------------
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
@@ -676,6 +780,7 @@ def main():
     overall_hyps: List[str] = []
     overall_refs: List[str] = []
     split_wers: Dict[str, float] = {}
+    split_bias: Dict[str, BiasWERResult] = {}
 
     t0 = time.time()
 
@@ -683,33 +788,44 @@ def main():
         log_separator()
         logger.info(f"Evaluating: split={split}, infer_type={args.infer_type}")
 
-        dataset = LibriSpeechDataset(
-            data_path=str(data_dir), split=split, config=data_cfg
+        # max_samples=0: score every test utterance (no 30 s length filter).
+        dataset = build_dataset(
+            str(data_dir), split, args.dataset, config=data_cfg, max_samples=0
         )
         logger.info(f"Loaded {len(dataset)} samples from {split}")
 
         # Select collate function based on infer_type
         if args.infer_type == "nobias":
             collate_fn = get_nobias_collate_fn(
-                model.encoder_processor,
+                model.encoder,
                 model.decoder_processor,
                 device=str(device),
+                language=language,
             )
         elif args.infer_type == "gt":
+            # For Japanese, annotate GT hotwords with their reading in the prompt.
+            reading_fn = None
+            if language == "ja":
+                from src.utils.japanese import to_katakana
+
+                reading_fn = to_katakana
             collate_fn = get_gt_collate_fn(
-                model.encoder_processor,
+                model.encoder,
                 model.decoder_processor,
                 bias_data=bias_data,
                 device=str(device),
+                language=language,
+                reading_fn=reading_fn,
             )
         elif args.infer_type == "filter":
             collate_fn = get_filter_collate_fn(
-                model.encoder_processor,
+                model.encoder,
                 model.decoder_processor,
                 bias_data=bias_data,
                 ctc_data=ctc_data,
                 hotword_filter=hotword_filter,
                 device=str(device),
+                language=language,
             )
         else:
             raise ValueError(f"Unknown infer_type: {args.infer_type}")
@@ -730,16 +846,28 @@ def main():
             num_beams=num_beams,
             do_sample=args.do_sample,
             data_device=args.data_device,
+            language=language,
         )
+        metric = results["metric"]
 
         split_wers[split] = results["wer"]
         overall_hyps.extend(results["hyps"])
         overall_refs.extend(results["refs"])
 
         logger.info(
-            f"[{split}] WER = {results['wer']*100:.2f}%  "
+            f"[{split}] {metric.upper()} = {results['wer']*100:.2f}%  "
             f"({len(results['hyps'])} utterances)"
         )
+
+        if bias_scorer is not None:
+            bias_res = bias_scorer.score(
+                results["raw_hyps"],
+                results["raw_refs"],
+                biasing_words_for(bias_data, results["utt_ids"]),
+            )
+            split_bias[split] = bias_res
+            results["bias_wer"] = bias_res.to_dict()
+            logger.info(f"[{split}] ({bias_res.word_splitter} words)\n{bias_res}")
 
         # Save per-split results
         save_results(results, args.output_dir, split)
@@ -748,15 +876,28 @@ def main():
 
     # Overall WER (if multiple splits)
     if len(args.splits) > 1:
-        overall_wer = compute_wer(overall_hyps, overall_refs)
+        # hyps/refs are already normalised; the identity normaliser just re-scores
+        _, overall_wer, _, _ = score_transcripts(
+            overall_hyps, overall_refs, language=language
+        )
         split_wers["overall"] = overall_wer
-        logger.info(f"\nOverall WER = {overall_wer*100:.2f}%")
+        logger.info(f"\nOverall {metric.upper()} = {overall_wer*100:.2f}%")
+        if split_bias:
+            split_bias["overall"] = sum(split_bias.values(), BiasWERResult())
 
     # Print summary
     log_separator()
     logger.info(f"INFERENCE RESULTS  (infer_type={args.infer_type})")
     for split, w in split_wers.items():
-        logger.info(f"  {split:20s}  WER = {w*100:.2f}%")
+        line = f"  {split:20s}  {metric.upper()} = {w*100:.2f}%"
+        if split in split_bias:
+            b = split_bias[split]
+            rates = [
+                "n/a" if c.rate is None else f"{c.rate*100:.2f}%"
+                for c in (b.wer, b.u_wer, b.b_wer)
+            ]
+            line += " | WER = {} | U-WER = {} | B-WER = {}".format(*rates)
+        logger.info(line)
     logger.info(f"  {'time':20s}  {elapsed:.1f}s ({elapsed/60:.1f}min)")
 
     # Save global summary
@@ -767,7 +908,12 @@ def main():
                 "checkpoint": str(ckpt_path),
                 "infer_type": args.infer_type,
                 "splits": args.splits,
-                "wer": split_wers,
+                "language": language,
+                "metric": metric,
+                # key kept as "wer" for existing tooling; holds CER when metric == "cer"
+                f"{metric}": split_wers,
+                # WER / U-WER / B-WER (R-WER) per split, when a bias list was given
+                "bias_wer": {k: v.to_dict() for k, v in split_bias.items()} or None,
                 "num_samples": len(overall_hyps),
                 "elapsed_seconds": elapsed,
                 "config": {
